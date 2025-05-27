@@ -39,8 +39,7 @@ set(PARSER_SOURCES
 
 set(VM_SOURCES
     src/vm/vm.c
-    src/vm/array.c
-    src/vm/object.c
+        src/vm/object.c
     src/vm/string_pool.c
 )
 
@@ -159,30 +158,6 @@ target_link_libraries(swiftlang lang_lib)
 # add_executable(test_module_hierarchy src/test_module_main.c)
 # target_link_libraries(test_module_hierarchy lang_lib)
 
-# Module builder tool - removed, functionality now in CLI
-
-# Native modules (shared libraries)
-add_library(net_module SHARED src/stdlib/net_native.c)
-target_link_libraries(net_module lang_lib)
-set_target_properties(net_module PROPERTIES PREFIX "" OUTPUT_NAME "net")
-
-add_library(fs_module SHARED src/stdlib/fs_native.c)
-target_link_libraries(fs_module lang_lib)
-set_target_properties(fs_module PROPERTIES PREFIX "" OUTPUT_NAME "fs")
-
-add_library(sys_module SHARED src/stdlib/sys_native.c)
-target_link_libraries(sys_module lang_lib)
-set_target_properties(sys_module PROPERTIES PREFIX "" OUTPUT_NAME "sys")
-
-# Math module is now in modules/math/src/
-add_library(math_module SHARED modules/math/src/math_native.c)
-target_link_libraries(math_module m)  # Link with math library only, not lang_lib
-target_include_directories(math_module PRIVATE include)
-set_target_properties(math_module PROPERTIES PREFIX "" OUTPUT_NAME "math_native")
-
-# Install native modules to a modules directory
-install(TARGETS net_module fs_module sys_module
-        LIBRARY DESTINATION lib/swiftlang/modules)
 
 # GLFW module (if GLFW is found)
 if(GLFW_FOUND)

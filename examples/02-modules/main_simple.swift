@@ -1,10 +1,15 @@
 // Module System Example - Demonstrating import concepts
 // Note: Multi-file modules are still in development
 
-// In a real module system, these would be in math_utils.swift
-func square(x: Number) -> Number {
-    return x * x
+import @math_utils as math
+import {square} from @math_utils
+print("got ${math.PI} from math_utils")
+
+func String.out(){
+    print("${this}")
 }
+
+"test".out()
 
 func cube(x: Number) -> Number {
     return x * x * x
@@ -39,20 +44,21 @@ func strToLowerCase(str: String) -> String {
     return "[lower] " + str
 }
 
-func strRepeat(str: String, times: Number) -> String {
+
+func String.repeat(times: Number) -> String {
     var result = ""
     var i = 0
     while i < times {
-        result = result + str
+        result = result + this
         i = i + 1
     }
     return result
 }
 
-func strJoin(strings: Array, separator: String) -> String {
-    var result = ""
+func Array.join(separator: String) -> String {
+ var result = ""
     var i = 0
-    for str in strings {
+    for str in this {
         if i > 0 {
             result = result + separator
         }
@@ -75,10 +81,9 @@ print("Sum of even numbers:", sumEvens(numbers))
 
 print("\n=== String Functions Demo ===")
 let words = ["Hello", "SwiftLang", "World"]
-print("Joined:", strJoin(words, ", "))
+print("Joined with extension:", words.join(", "))
 
-let stars = strRepeat("*", 5)
-print("Stars:", stars)
+print("Stars:", "*".repeat(25))
 
 print("Uppercase:", strToUpperCase("hello"))
 print("Lowercase:", strToLowerCase("HELLO"))
