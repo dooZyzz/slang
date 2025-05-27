@@ -1,0 +1,7 @@
+{
+  "name": "extensions-example",
+  "version": "1.0.0",
+  "description": "SwiftLang Kotlin-like extension functions demonstration",
+  "main": "main.swift",
+  "type": "application",
+}

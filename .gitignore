@@ -1,0 +1,348 @@
+# Build directories
+build/
+cmake-build-*/
+out/
+bin/
+dist/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.cmake
+!cmake/*.cmake
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+*.ko
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+*.so.*
+*.dylib.*
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+swiftlang
+swiftmodule
+!examples/**/*.swiftmodule
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+*.ilk
+*.map
+*.exp
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+# IDE - Visual Studio Code
+.vscode/
+*.code-workspace
+.history/
+
+# IDE - CLion
+.idea/
+cmake-build-*/
+*.iws
+*.iml
+*.ipr
+
+# IDE - Xcode
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xccheckout
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.xcuserstate
+project.xcworkspace/
+
+# IDE - Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vcxproj.filters
+*.vcxproj.user
+
+# IDE - Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# IDE - Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+*.un~
+Session.vim
+.netrwhist
+*~
+tags
+
+# IDE - Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+.org-id-locations
+*_archive
+*_flymake.*
+/eshell/history
+/eshell/lastdir
+/elpa/
+*.rel
+/auto/
+.cask/
+dist/
+flycheck_*.el
+.projectile
+.dir-locals.el
+
+# Operating System - macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Operating System - Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Operating System - Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.backup
+tmp/
+temp/
+
+# Test coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
+*.lcov
+.nyc_output/
+
+# Documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+*.doxygen
+
+# Package files
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.7z
+*.dmg
+*.iso
+*.jar
+*.rar
+
+# Security
+*.pem
+*.key
+*.crt
+*.p12
+.env
+.env.local
+.env.*.local
+
+# Project specific
+*.swiftmodule
+!examples/**/*.swiftmodule
+test_*.swift
+Test*.swift
+/tests/output/
+/tests/results/
+
+# Benchmarks
+benchmark_results/
+*.bench
+
+# Profiling
+*.prof
+*.profile
+callgrind.out.*
+perf.data
+perf.data.old
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Memory leaks
+valgrind-*.log
+.valgrind-suppressions
+
+# Dependencies
+vendor/
+node_modules/
+bower_components/
+
+# Package managers
+.npm
+.yarn/
+.pnp.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+env/
+venv/
+ENV/
+
+# Ruby
+*.gem
+.bundle/
+Gemfile.lock
+
+# Rust
+target/
+Cargo.lock
+
+# Go
+*.test
+*.prof
+
+# Java
+*.class
+*.jar
+*.war
+*.ear
+
+# C/C++ dependencies
+deps/
+external/
+third_party/
+!cmake/Find*.cmake
+
+# Generated files
+generated/
+gen/
+auto-generated/
+
+# Backup files
+backup/
+backups/
+*.backup
+*.old
+*.orig
+
+# Patches
+*.patch
+*.diff
+
+# Archives
+archives/
+*.tar.*
+*.tgz
+
+# Miscellaneous
+.cache/
+.metadata
+.gradle/
+local.properties

@@ -1,0 +1,7 @@
+{
+  "name": "stdlib-example",
+  "version": "1.0.0",
+  "description": "SwiftLang standard library usage demonstration",
+  "main": "main.swift",
+  "type": "executable"
+}

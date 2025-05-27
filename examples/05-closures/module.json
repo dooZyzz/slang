@@ -1,0 +1,7 @@
+{
+  "name": "closures-example",
+  "version": "1.0.0",
+  "description": "SwiftLang closures and higher-order functions demonstration",
+  "main": "main.swift",
+  "type": "executable"
+}

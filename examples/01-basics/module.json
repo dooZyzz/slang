@@ -1,0 +1,7 @@
+{
+  "name": "basics-example",
+  "version": "1.0.0",
+  "description": "Basic SwiftLang features demonstration",
+  "main": "main.swift",
+  "type": "executable"
+}

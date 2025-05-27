@@ -1,0 +1,10 @@
+{
+  "name": "structs-example",
+  "version": "1.0.0",
+  "description": "SwiftLang structs and object-oriented features demonstration",
+  "main": "main.swift",
+  "type": "application",
+  "sources": [
+    "main.swift"
+  ]
+}
