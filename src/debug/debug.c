@@ -1,13 +1,17 @@
 #include "debug/debug.h"
 #include <stdio.h>
+#include <stdlib.h>
 
-DebugFlags debug_flags = {false, false, false, false};
+DebugFlags debug_flags = {false, false, false, false, false, false, false};
 
 void debug_init(void) {
     debug_flags.print_tokens = false;
     debug_flags.print_ast = false;
     debug_flags.print_bytecode = false;
     debug_flags.trace_execution = false;
+    debug_flags.module_loading = getenv("SWIFTLANG_DEBUG_MODULES") != NULL;
+    debug_flags.module_cache = getenv("SWIFTLANG_DEBUG_CACHE") != NULL;
+    debug_flags.module_hooks = getenv("SWIFTLANG_DEBUG_HOOKS") != NULL;
 }
 
 void debug_set_flags(bool tokens, bool ast, bool bytecode, bool trace) {
@@ -148,6 +152,14 @@ int disassemble_instruction(Chunk* chunk, int offset) {
             return simple_instruction("OP_HALT", offset);
         case OP_MODULE_EXPORT:
             return simple_instruction("OP_MODULE_EXPORT", offset);
+        case OP_IMPORT_ALL_FROM:
+            return simple_instruction("OP_IMPORT_ALL_FROM", offset);
+        case OP_LOAD_MODULE:
+            return simple_instruction("OP_LOAD_MODULE", offset);
+        case OP_LOAD_NATIVE_MODULE:
+            return simple_instruction("OP_LOAD_NATIVE_MODULE", offset);
+        case OP_IMPORT_FROM:
+            return simple_instruction("OP_IMPORT_FROM", offset);
         case OP_DEFINE_STRUCT: {
             printf("OP_DEFINE_STRUCT ");
             uint8_t name_const = chunk->code[offset + 1];

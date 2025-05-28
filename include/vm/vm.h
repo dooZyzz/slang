@@ -115,6 +115,7 @@ typedef enum {
     OP_LOAD_MODULE,
     OP_LOAD_NATIVE_MODULE,
     OP_IMPORT_FROM,
+    OP_IMPORT_ALL_FROM,
     OP_MODULE_EXPORT,
     
     // Long constants

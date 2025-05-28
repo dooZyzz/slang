@@ -1,0 +1,22 @@
+{
+    "name": "module_system",
+    "version": "1.0.0",
+    "description": "Module system introspection and utilities",
+    "main": "module_system.swift",
+    "type": "library",
+    "exports": [
+        "current_module",
+        "loaded_modules",
+        "get_module",
+        "get_exports",
+        "is_loaded",
+        "get_version",
+        "get_state",
+        "print_module_info",
+        "find_modules",
+        "find_by_export",
+        "depends_on",
+        "has_capability",
+        "get_stats"
+    ]
+}

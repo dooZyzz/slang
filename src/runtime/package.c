@@ -45,28 +45,33 @@ static char* json_get_string(const char* json, const char* key) {
     const char* start = strstr(json, search_key);
     if (!start) return NULL;
     
-    start = strchr(start, '"');
-    if (!start) return NULL;
-    start++; // Skip opening quote
+    // Move past the key and colon
+    start += strlen(search_key);
     
-    const char* next_quote = strchr(start, '"');
-    if (!next_quote) return NULL;
-    next_quote++; // Include closing quote
-    
-    // Find the actual string value
-    while (*next_quote && (*next_quote == ' ' || *next_quote == ':')) {
-        next_quote++;
+    // Skip whitespace
+    while (*start && (*start == ' ' || *start == '\t' || *start == '\n')) {
+        start++;
     }
     
-    if (*next_quote != '"') return NULL;
-    next_quote++; // Skip opening quote of value
+    // Check for opening quote
+    if (*start != '"') return NULL;
+    start++; // Skip opening quote
     
-    const char* end = strchr(next_quote, '"');
-    if (!end) return NULL;
+    // Find closing quote
+    const char* end = start;
+    while (*end && *end != '"') {
+        if (*end == '\\' && *(end + 1)) {
+            end += 2; // Skip escaped character
+        } else {
+            end++;
+        }
+    }
     
-    size_t len = end - next_quote;
+    if (*end != '"') return NULL;
+    
+    size_t len = end - start;
     char* result = malloc(len + 1);
-    strncpy(result, next_quote, len);
+    strncpy(result, start, len);
     result[len] = '\0';
     
     return result;
@@ -287,7 +292,52 @@ ModuleMetadata* package_load_module_metadata(const char* path) {
     char module_json_path[PATH_MAX];
     struct stat st;
     
-    printf("package_load_module_metadata called with path: %s\n", path);
+    fprintf(stderr, "package_load_module_metadata called with path: %s\n", path);
+    
+    // Check if path ends with .swiftmodule (archive)
+    size_t path_len = strlen(path);
+    if (path_len > 12 && strcmp(path + path_len - 12, ".swiftmodule") == 0) {
+        fprintf(stderr, "Path is a .swiftmodule archive, extracting module.json\n");
+        
+        // Open archive and extract module.json
+        ModuleArchive* archive = module_archive_open(path);
+        if (!archive) {
+            fprintf(stderr, "Failed to open archive: %s\n", path);
+            return NULL;
+        }
+        
+        char* json_content = NULL;
+        size_t json_size = 0;
+        if (!module_archive_extract_json(archive, &json_content, &json_size)) {
+            fprintf(stderr, "Failed to extract module.json from archive\n");
+            module_archive_destroy(archive);
+            return NULL;
+        }
+        
+        // Parse module.json content
+        ModuleMetadata* metadata = calloc(1, sizeof(ModuleMetadata));
+        metadata->name = json_get_string(json_content, "name");
+        metadata->version = json_get_string(json_content, "version");
+        metadata->description = json_get_string(json_content, "description");
+        metadata->type = json_get_string(json_content, "type");
+        metadata->main_file = json_get_string(json_content, "main");
+        metadata->path = strdup(path);
+        metadata->compiled_path = strdup(path); // The archive is the compiled module
+        
+        // Parse exports from JSON content
+        const char* exports_start = strstr(json_content, "\"exports\":");
+        if (exports_start) {
+            // TODO: Parse exports properly
+            metadata->export_count = 0;
+            metadata->exports = NULL;
+        }
+        
+        free(json_content);
+        module_archive_destroy(archive);
+        
+        fprintf(stderr, "Successfully loaded metadata from archive: name=%s\n", metadata->name);
+        return metadata;
+    }
     
     // Check if path is a directory
     if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
@@ -297,7 +347,7 @@ ModuleMetadata* package_load_module_metadata(const char* path) {
         strncpy(module_json_path, path, sizeof(module_json_path) - 1);
     }
     
-    printf("Loading module.json from: %s\n", module_json_path);
+    fprintf(stderr, "Loading module.json from: %s\n", module_json_path);
     
     FILE* file = fopen(module_json_path, "r");
     if (!file) return NULL;
@@ -419,7 +469,7 @@ ModuleMetadata* package_load_module_metadata(const char* path) {
     // Parse modules array (new multi-module support)
     const char* modules_start = strstr(content, "\"modules\":");
     if (modules_start) {
-        printf("Found modules array\n");
+        // printf("Found modules array\n");
         modules_start = strchr(modules_start, '[');
         if (modules_start) {
             // Count modules
@@ -490,33 +540,33 @@ ModuleMetadata* package_load_module_metadata(const char* path) {
     // Parse native section (legacy single-module support)
     const char* native_start = strstr(content, "\"native\":");
     if (native_start && !modules_start) {
-        printf("Found native section\n");
+        // printf("Found native section\n");
         native_start = strchr(native_start, '{');
         if (native_start) {
             metadata->native.source = json_get_string(native_start, "source");
             metadata->native.header = json_get_string(native_start, "header");
             metadata->native.library = json_get_string(native_start, "library");
-            printf("Native library from section: %s\n", metadata->native.library ? metadata->native.library : "NULL");
+            // printf("Native library from section: %s\n", metadata->native.library ? metadata->native.library : "NULL");
         }
     } else if (!modules_start) {
-        printf("No native section found, checking top level\n");
+        // printf("No native section found, checking top level\n");
         // Check for native_library at top level (legacy format)
         
         // Debug: print first 200 chars of JSON
-        printf("JSON content (first 200 chars): %.200s\n", content);
+        // printf("JSON content (first 200 chars): %.200s\n", content);
         
         metadata->native.library = json_get_string(content, "native_library");
         if (metadata->native.library) {
-            printf("Found native_library at top level: %s\n", metadata->native.library);
+            // printf("Found native_library at top level: %s\n", metadata->native.library);
         } else {
-            printf("No native_library found at top level\n");
+            // printf("No native_library found at top level\n");
             
             // Try to find it manually
             const char* search = strstr(content, "\"native_library\"");
             if (search) {
-                printf("Found 'native_library' string at position %ld\n", search - content);
+                // printf("Found 'native_library' string at position %ld\n", search - content);
             } else {
-                printf("String 'native_library' not found in JSON\n");
+                // printf("String 'native_library' not found in JSON\n");
             }
         }
     }

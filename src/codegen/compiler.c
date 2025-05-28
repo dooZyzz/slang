@@ -1319,6 +1319,11 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     int name_constant = chunk_add_constant(current->current_chunk,
                         STRING_VAL(strdup(import->namespace_alias)));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
+                } else if (import->import_all_to_scope) {
+                    // import * from module - import all exports into current scope
+                    // The module object is on the stack, we need to iterate through its properties
+                    // and define each as a global
+                    emit_byte(OP_IMPORT_ALL_FROM);
                 } else {
                     // No alias - define module with its original name
                     const char* module_simple_name = module_name;

@@ -1,0 +1,11 @@
+{
+    "name": "module-demo",
+    "version": "1.0.0",
+    "description": "Example demonstrating module imports",
+    "main": "main.swift",
+    "type": "application",
+    "dependencies": {
+        "hello": "1.0.0",
+        "time": "1.0.0"
+    }
+}

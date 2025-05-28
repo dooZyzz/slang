@@ -1,3 +1,35 @@
+/**
+ * SwiftLang Module System Implementation
+ * 
+ * This file implements the core module loading and management system for SwiftLang.
+ * The module system supports multiple module types and loading mechanisms:
+ * 
+ * 1. Compiled Modules (.swiftmodule archives)
+ *    - ZIP archives containing bytecode and metadata
+ *    - Pre-compiled for fast loading
+ *    - Support for module exports and dependencies
+ * 
+ * 2. Source Modules (.swift files)
+ *    - Compiled on-demand from source
+ *    - Cached as bytecode for subsequent loads
+ *    - Support for directory-based modules with module.json
+ * 
+ * 3. Native Modules (.dylib/.so)
+ *    - Dynamic libraries with C API
+ *    - Seamless integration with SwiftLang functions
+ *    - Used for system interfaces and performance-critical code
+ * 
+ * Key Features:
+ * - Module caching to avoid recompilation
+ * - Path resolution with multiple search paths
+ * - Package system integration
+ * - Export/import mechanism for controlled visibility
+ * - Module-scoped globals and execution context
+ * 
+ * The module loader maintains a cache of loaded modules and handles
+ * circular dependencies through proper state management.
+ */
+
 #include "runtime/module.h"
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +39,8 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <glob.h>
+#include <sys/time.h>
+#include <libgen.h>
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
@@ -19,6 +53,17 @@
 #include "runtime/package.h"
 #include "utils/bytecode_format.h"
 #include "utils/logger.h"
+#include "utils/version.h"
+#include "runtime/module_hooks.h"
+#include "runtime/module_inspect.h"
+
+// Constants
+#define MODULE_NAME_BUFFER_SIZE 512
+#define MODULE_PATH_BUFFER_SIZE 1024
+
+// Forward declarations
+bool ensure_module_initialized(Module* module, VM* vm);
+static bool check_module_version_compatibility(const char* required_version, const char* module_version);
 
 // Hash function for module scope
 static uint32_t hash_string(const char* key) {
@@ -155,14 +200,33 @@ bool module_has_in_scope(Module* module, const char* name) {
     return module_scope_has(module->scope, name);
 }
 
-// Load a module from a .swiftmodule archive
+/**
+ * Load a module from a compiled .swiftmodule archive.
+ * 
+ * This function handles the complete process of loading a module from a ZIP archive:
+ * 1. Opens the archive and extracts metadata (module.json)
+ * 2. Deserializes the bytecode for the module
+ * 3. Executes the module bytecode in a separate VM instance
+ * 4. Extracts exported symbols from the module object
+ * 5. Returns a fully initialized Module structure
+ * 
+ * @param loader The module loader instance
+ * @param archive_path Path to the .swiftmodule archive file
+ * @param module_name Name of the module being loaded
+ * @return Initialized Module* on success, or Module with error state on failure
+ */
 static Module* module_load_from_archive(ModuleLoader* loader, const char* archive_path, const char* module_name) {
+    MODULE_DEBUG("module_load_from_archive called: archive=%s, module=%s\n", archive_path, module_name);
+    
     // Create module
     Module* module = calloc(1, sizeof(Module));
     module->path = strdup(module_name);
     module->absolute_path = strdup(archive_path);
     module->state = MODULE_STATE_LOADING;
     module->is_native = false;
+    
+    // Track load start
+    module_track_load_start(module);
     
     // Initialize exports
     module->exports.capacity = 16;
@@ -192,7 +256,31 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         return module;
     }
     
-    // We don't need to parse the full metadata for now
+    // Parse version from JSON
+    const char* version_start = strstr(json_content, "\"version\"");
+    if (version_start) {
+        version_start = strchr(version_start, ':');
+        if (version_start) {
+            version_start++; // Skip :
+            // Skip whitespace
+            while (*version_start && (*version_start == ' ' || *version_start == '\t')) {
+                version_start++;
+            }
+            if (*version_start == '"') {
+                version_start++; // Skip opening quote
+                const char* version_end = strchr(version_start, '"');
+                if (version_end) {
+                    size_t version_len = version_end - version_start;
+                    char* version = malloc(version_len + 1);
+                    strncpy(version, version_start, version_len);
+                    version[version_len] = '\0';
+                    module->version = version;
+                    MODULE_DEBUG("Module version: %s\n", module->version);
+                }
+            }
+        }
+    }
+    
     free(json_content);
     
     // Find the main module bytecode (usually named after the package)
@@ -200,12 +288,12 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     size_t bytecode_size = 0;
     
     // Try with swift. prefix first
-    char bytecode_name[256];
+    char bytecode_name[MODULE_NAME_BUFFER_SIZE];
     snprintf(bytecode_name, sizeof(bytecode_name), "swift.%s", module_name);
-    // fprintf(stderr, "[DEBUG] Looking for bytecode: %s\n", bytecode_name);
+    MODULE_DEBUG("Looking for bytecode: %s\n", bytecode_name);
     
     if (!module_archive_extract_bytecode(archive, bytecode_name, &bytecode, &bytecode_size)) {
-        // fprintf(stderr, "[DEBUG] Failed with swift prefix, trying without\n");
+        MODULE_DEBUG("Failed with swift prefix, trying without\n");
         
         // Try without the swift. prefix
         if (!module_archive_extract_bytecode(archive, module_name, &bytecode, &bytecode_size)) {
@@ -216,14 +304,14 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         }
     }
     
-    // fprintf(stderr, "[DEBUG] Successfully extracted bytecode, size: %zu\n", bytecode_size);
+    MODULE_DEBUG("Successfully extracted bytecode, size: %zu\n", bytecode_size);
     
     // Deserialize and execute the bytecode
     Chunk* chunk = malloc(sizeof(Chunk));
     chunk_init(chunk);
     
     // Use the proper bytecode deserialization
-    // fprintf(stderr, "[DEBUG] About to deserialize bytecode of size %zu\n", bytecode_size);
+    MODULE_DEBUG("About to deserialize bytecode of size %zu\n", bytecode_size);
     if (!bytecode_deserialize(bytecode, bytecode_size, chunk)) {
         fprintf(stderr, "Failed to deserialize module bytecode\n");
         free(bytecode);
@@ -233,7 +321,7 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         module->state = MODULE_STATE_ERROR;
         return module;
     }
-    // fprintf(stderr, "[DEBUG] Bytecode deserialized successfully\n");
+    MODULE_DEBUG("Bytecode deserialized successfully\n");
     
     free(bytecode);
     
@@ -243,15 +331,18 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     // Save VM state
     Chunk* saved_chunk = vm->chunk;
     const char* saved_module_path = vm->current_module_path;
+    Module* saved_module = vm->current_module;
     
-    // Set current module path
+    // Set current module context
     vm->current_module_path = module->path;
+    vm->current_module = module;
     
     // Define __module_exports__
     define_global(vm, "__module_exports__", OBJECT_VAL(module->module_object));
     
     // Execute bytecode
-    // fprintf(stderr, "[DEBUG] Executing module bytecode for: %s (chunk has %zu bytes)\n", module_name, chunk->count);
+    MODULE_DEBUG("Executing module bytecode for: %s (chunk has %zu bytes)\n", module_name, chunk->count);
+    MODULE_DEBUG("Module pointer: %p, current_module set to: %p\n", module, vm->current_module);
     
     // Debug: Print raw bytecode
     // fprintf(stderr, "[DEBUG] Module bytecode (%zu bytes): ", chunk->count);
@@ -278,8 +369,20 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     //     }
     // }
     
-    // Execute module by creating a separate VM instance
-    // fprintf(stderr, "[DEBUG] Creating separate VM for module execution\n");
+    // Store the chunk for potential lazy execution
+    module->chunk = chunk;
+    
+    // Check if lazy loading is enabled
+    bool lazy_loading = getenv("SWIFTLANG_LAZY_MODULES") != NULL;
+    if (lazy_loading) {
+        MODULE_DEBUG("Lazy loading enabled for module: %s\n", module_name);
+        module->state = MODULE_STATE_UNLOADED;
+        module_archive_destroy(archive);
+        return module;
+    }
+    
+    // Execute module immediately if not lazy loading
+    MODULE_DEBUG("Creating separate VM for module execution\n");
     
     VM module_vm;
     vm_init_with_loader(&module_vm, loader);
@@ -292,9 +395,9 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     // Define __module_exports__ for export statements
     define_global(&module_vm, "__module_exports__", OBJECT_VAL(module->module_object));
     
-    // fprintf(stderr, "[DEBUG] About to call vm_interpret in separate VM\n");
+    MODULE_DEBUG("About to call vm_interpret in separate VM\n");
     InterpretResult result = vm_interpret(&module_vm, chunk);
-    // fprintf(stderr, "[DEBUG] vm_interpret returned: %d\n", result);
+    MODULE_DEBUG("vm_interpret returned: %d\n", result);
     
     if (result == INTERPRET_OK) {
         // Copy module globals before destroying the VM
@@ -322,17 +425,52 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         // fprintf(stderr, "[DEBUG] Module executed successfully: %s\n", module_name);
         module->state = MODULE_STATE_LOADED;
         
-        // Debug: Check module exports
-        // fprintf(stderr, "[DEBUG] Module object properties:\n");
+        // Execute module initialization hooks (before VM is freed)
+        bool hooks_ok = module_execute_init_hooks(module, &module_vm);
+        
+        // Extract exports from module object
         if (module->module_object) {
-            // This would need a proper object property iteration
-            // fprintf(stderr, "[DEBUG] Module object exists\n");
+            MODULE_DEBUG("Extracting exports from module object\n");
+            ObjectProperty* prop = module->module_object->properties;
+            int prop_count = 0;
+            while (prop) {
+                prop_count++;
+                MODULE_DEBUG("Found property: %s\n", prop->key);
+                // If the property is a function, ensure it has a reference to this module
+                if (prop->value && IS_FUNCTION(*prop->value)) {
+                    AS_FUNCTION(*prop->value)->module = module;
+                }
+                // Add to exports array
+                if (module->exports.count >= module->exports.capacity) {
+                    module->exports.capacity *= 2;
+                    module->exports.names = realloc(module->exports.names, 
+                                                   module->exports.capacity * sizeof(char*));
+                    module->exports.values = realloc(module->exports.values,
+                                                    module->exports.capacity * sizeof(TaggedValue));
+                    module->exports.visibility = realloc(module->exports.visibility,
+                                                        module->exports.capacity * sizeof(uint8_t));
+                }
+                module->exports.names[module->exports.count] = strdup(prop->key);
+                module->exports.values[module->exports.count] = *prop->value;
+                module->exports.visibility[module->exports.count] = 1; // Public
+                module->exports.count++;
+                
+                prop = prop->next;
+            }
+            MODULE_DEBUG("Total properties extracted: %d, exports count: %zu\n", prop_count, module->exports.count);
+        }
+        
+        // Check hooks result after exports are processed
+        if (!hooks_ok) {
+            fprintf(stderr, "Module init hooks failed for: %s\n", module_name);
+            module->state = MODULE_STATE_ERROR;
         }
     }
     
     // Restore VM state
     vm->chunk = saved_chunk;
     vm->current_module_path = saved_module_path;
+    vm->current_module = saved_module;
     undefine_global(vm, "__module_exports__");
     
     // fprintf(stderr, "[DEBUG] Module execution completed, cleaning up\n");
@@ -343,6 +481,107 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     module_archive_destroy(archive);
     
     return module;
+}
+
+/**
+ * Ensure a module is initialized (for lazy loading).
+ * This function executes the module's bytecode if it hasn't been executed yet.
+ */
+bool ensure_module_initialized(Module* module, VM* vm) {
+    if (!module || module->state == MODULE_STATE_LOADED || module->state == MODULE_STATE_ERROR) {
+        return module && module->state == MODULE_STATE_LOADED;
+    }
+    
+    if (module->state == MODULE_STATE_LOADING) {
+        // Already being loaded (circular dependency)
+        return false;
+    }
+    
+    if (module->state == MODULE_STATE_UNLOADED && module->chunk) {
+        fprintf(stderr, "[DEBUG] Initializing lazy-loaded module: %s\n", module->path);
+        
+        // Mark as loading to prevent circular initialization
+        module->state = MODULE_STATE_LOADING;
+        
+        // Create a separate VM for module execution
+        VM module_vm;
+        vm_init_with_loader(&module_vm, vm->module_loader);
+        
+        // Copy necessary state
+        module_vm.current_module_path = module->path;
+        module_vm.module_loader = vm->module_loader;
+        module_vm.current_module = module;
+        
+        // Define __module_exports__ for export statements
+        define_global(&module_vm, "__module_exports__", OBJECT_VAL(module->module_object));
+        
+        // Execute the module
+        InterpretResult result = vm_interpret(&module_vm, module->chunk);
+        
+        if (result == INTERPRET_OK) {
+            // Copy module globals
+            module->globals.count = module_vm.globals.count;
+            module->globals.capacity = module_vm.globals.capacity;
+            module->globals.names = malloc(sizeof(char*) * module->globals.capacity);
+            module->globals.values = malloc(sizeof(TaggedValue) * module->globals.capacity);
+            
+            for (size_t i = 0; i < module->globals.count; i++) {
+                module->globals.names[i] = strdup(module_vm.globals.names[i]);
+                module->globals.values[i] = module_vm.globals.values[i];
+            }
+            
+            // Extract exports from module object
+            if (module->module_object) {
+                ObjectProperty* prop = module->module_object->properties;
+                while (prop) {
+                    if (prop->value && IS_FUNCTION(*prop->value)) {
+                        AS_FUNCTION(*prop->value)->module = module;
+                    }
+                    if (module->exports.count >= module->exports.capacity) {
+                        module->exports.capacity *= 2;
+                        module->exports.names = realloc(module->exports.names, 
+                                                       module->exports.capacity * sizeof(char*));
+                        module->exports.values = realloc(module->exports.values,
+                                                        module->exports.capacity * sizeof(TaggedValue));
+                        module->exports.visibility = realloc(module->exports.visibility,
+                                                            module->exports.capacity * sizeof(uint8_t));
+                    }
+                    module->exports.names[module->exports.count] = strdup(prop->key);
+                    module->exports.values[module->exports.count] = *prop->value;
+                    module->exports.visibility[module->exports.count] = 1;
+                    module->exports.count++;
+                    prop = prop->next;
+                }
+            }
+            
+            module->state = MODULE_STATE_LOADED;
+            
+            // Execute module initialization hooks
+            if (!module_execute_init_hooks(module, vm)) {
+                fprintf(stderr, "Module init hooks failed for: %s\n", module->path);
+                module->state = MODULE_STATE_ERROR;
+                return false;
+            }
+            
+            // Execute first-use hooks for lazy-loaded modules
+            module_execute_first_use_hooks(module, vm);
+        } else {
+            module->state = MODULE_STATE_ERROR;
+        }
+        
+        // Clean up
+        module_vm.module_loader = NULL;
+        vm_free(&module_vm);
+        
+        // Don't need the chunk anymore
+        chunk_free(module->chunk);
+        free(module->chunk);
+        module->chunk = NULL;
+        
+        return module->state == MODULE_STATE_LOADED;
+    }
+    
+    return false;
 }
 
 static char* resolve_module_path(ModuleLoader* loader, const char* path, const char* relative_to) {
@@ -453,13 +692,19 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
     char buffer[PATH_MAX];
     char converted_path[PATH_MAX];
     
+    // Handle @module syntax for local modules
+    const char* search_path = path;
+    if (path[0] == '@') {
+        search_path = path + 1; // Skip the @ prefix
+    }
+    
     // Convert dotted path to file path (e.g., sys.native.io -> sys/native/io)
     size_t j = 0;
-    for (size_t i = 0; path[i] != '\0' && j < PATH_MAX - 1; i++) {
-        if (path[i] == '.') {
+    for (size_t i = 0; search_path[i] != '\0' && j < PATH_MAX - 1; i++) {
+        if (search_path[i] == '.') {
             converted_path[j++] = '/';
         } else {
-            converted_path[j++] = path[i];
+            converted_path[j++] = search_path[i];
         }
     }
     converted_path[j] = '\0';
@@ -513,6 +758,13 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
             }
         }
         
+        // Try as directory with module.json
+        snprintf(buffer, sizeof(buffer), "%s/%s/module.json", loader->search_paths.paths[i], converted_path);
+        if (access(buffer, F_OK) == 0) {
+            snprintf(buffer, sizeof(buffer), "%s/%s", loader->search_paths.paths[i], converted_path);
+            return strdup(buffer);
+        }
+        
         // Try as regular Swift module with converted path
         snprintf(buffer, sizeof(buffer), "%s/%s", loader->search_paths.paths[i], converted_path);
         if (access(buffer, F_OK) == 0) {
@@ -526,13 +778,13 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
         }
         
         // Also try with original dotted path for backward compatibility
-        snprintf(buffer, sizeof(buffer), "%s/%s.swift", loader->search_paths.paths[i], path);
+        snprintf(buffer, sizeof(buffer), "%s/%s.swift", loader->search_paths.paths[i], search_path);
         if (access(buffer, F_OK) == 0) {
             return strdup(buffer);
         }
         
         // Try as .swiftmodule archive
-        snprintf(buffer, sizeof(buffer), "%s/%s.swiftmodule", loader->search_paths.paths[i], path);
+        snprintf(buffer, sizeof(buffer), "%s/%s.swiftmodule", loader->search_paths.paths[i], search_path);
         if (access(buffer, F_OK) == 0) {
             return strdup(buffer);
         }
@@ -744,7 +996,7 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
         
         if (strstr(entry_name, "bytecode/") == entry_name && strstr(entry_name, ".swiftbc")) {
             // Extract module name
-            char module_name[256];
+            char module_name[MODULE_NAME_BUFFER_SIZE];
             const char* start = entry_name + strlen("bytecode/");
             const char* end = strstr(start, ".swiftbc");
             size_t len = end - start;
@@ -1030,6 +1282,27 @@ Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata
     return module;
 }
 
+/**
+ * Load a module with path resolution relative to a base path.
+ * 
+ * This is the main entry point for module loading. It handles:
+ * - Cache lookup to avoid reloading modules
+ * - Path resolution (absolute, relative, package-based)
+ * - Different module types (.swiftmodule archives, source files, native libraries)
+ * - Module initialization and registration
+ * 
+ * The function follows this resolution order:
+ * 1. Check module cache
+ * 2. Try package system resolution
+ * 3. Resolve relative/absolute paths
+ * 4. Load based on file type (.swiftmodule, .swift, or native)
+ * 
+ * @param loader Module loader instance
+ * @param path Module path or name to load
+ * @param is_native True if loading a native module
+ * @param relative_to Optional base path for relative imports
+ * @return Loaded Module* or NULL on failure
+ */
 Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_native, const char* relative_to) {
     LOG_DEBUG(LOG_MODULE_MODULE_LOADER, "Loading module: path=%s, is_native=%d, relative_to=%s", 
               path, is_native, relative_to ? relative_to : "(null)");
@@ -1044,8 +1317,16 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         LOG_TRACE(LOG_MODULE_MODULE_LOADER, "Returning cached module %p for %s with state=%d", 
                   cached, path, cached->state);
         if (getenv("SWIFTLANG_DEBUG")) {
-            // fprintf(stderr, "[DEBUG] Returning cached module %p for %s with state=%d\n", cached, path, cached->state);
+            fprintf(stderr, "[DEBUG] Returning cached module for %s with state=%d, exports=%zu\n", 
+                    path, cached->state, cached->exports.count);
         }
+        
+        // Check for circular dependency
+        if (cached->state == MODULE_STATE_LOADING) {
+            fprintf(stderr, "Circular dependency detected: module '%s' is already being loaded\n", path);
+            return NULL;
+        }
+        
         return cached;
     }
     
@@ -1174,7 +1455,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         typedef bool (*ModuleInitFn)(Module*);
         
         // Try module-specific init function first (e.g., swiftlang_math_native_module_init)
-        char init_fn_name[256];
+        char init_fn_name[MODULE_NAME_BUFFER_SIZE];
         const char* module_name = path;
         
         // Skip prefixes
@@ -1224,22 +1505,24 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         // Check if this is a .swiftmodule archive
         size_t path_len = strlen(absolute_path);
         if (path_len > 12 && strcmp(absolute_path + path_len - 12, ".swiftmodule") == 0) {
-            // Load from archive through package system
-            ModuleMetadata* metadata = package_load_module_metadata(absolute_path);
-            if (metadata) {
-                Module* loaded = load_module_from_metadata(loader, metadata);
-                if (loaded) {
-                    // Update the cached module with loaded data
-                    module->exports = loaded->exports;
-                    module->module_object = loaded->module_object;
-                    module->native_handle = loaded->native_handle;
-                    module->state = loaded->state;
-                    module->is_native = loaded->is_native;
-                    free((void*)loaded->path);
-                    free(loaded);
-                    free(absolute_path);
-                    return module;
-                }
+            // Load from .swiftmodule archive
+            if (getenv("SWIFTLANG_DEBUG")) {
+                fprintf(stderr, "[DEBUG] Loading from .swiftmodule archive: %s\n", absolute_path);
+            }
+            Module* loaded = module_load_from_archive(loader, absolute_path, path);
+            if (loaded) {
+                // Update the cached module with loaded data
+                module->exports = loaded->exports;
+                module->module_object = loaded->module_object;
+                module->native_handle = loaded->native_handle;
+                module->state = loaded->state;
+                module->is_native = loaded->is_native;
+                module->globals = loaded->globals;
+                free((void*)loaded->path);
+                free((void*)loaded->absolute_path);
+                free(loaded);
+                free(absolute_path);
+                return module;
             }
             fprintf(stderr, "Failed to load module from archive: %s\n", absolute_path);
             module->state = MODULE_STATE_ERROR;
@@ -1374,47 +1657,117 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         
         free(file_path_to_load);
         
-        // Parse the module source
-        // fprintf(stderr, "[DEBUG] Parsing module source...\n");
-        Lexer* lexer = lexer_create(source);
-        Parser* parser = parser_create(source);
-        
-        ProgramNode* program = parser_parse_program(parser);
-        if (parser->had_error) {
-            fprintf(stderr, "Failed to parse module: %s\n", absolute_path);
-            // TODO: ast_free_program(program);
-            lexer_destroy(lexer);
-            parser_destroy(parser);
-            free(source);
-            module->state = MODULE_STATE_ERROR;
-            return NULL;
+        // Get file modification time for cache invalidation
+        struct stat file_stat_cache;
+        if (stat(absolute_path, &file_stat_cache) != 0) {
+            file_stat_cache.st_mtime = 0;
         }
         
-        if (getenv("SWIFTLANG_DEBUG")) {
-            // fprintf(stderr, "[DEBUG] Module parsed successfully with %zu statements\n", 
-            //         program ? program->statement_count : 0);
-        }
-        
-        // Create a chunk for the module
+        // Check for cached bytecode
+        char cache_path[PATH_MAX];
+        const char* home = getenv("HOME");
+        bool loaded_from_cache = false;
         Chunk* module_chunk = malloc(sizeof(Chunk));
         chunk_init(module_chunk);
         
-        // Compile the module
-        if (getenv("SWIFTLANG_DEBUG")) {
-            // fprintf(stderr, "[DEBUG] Compiling module source...\n");
+        if (home) {
+            // Create cache directory if it doesn't exist
+            char cache_dir[PATH_MAX];
+            snprintf(cache_dir, sizeof(cache_dir), "%s/.swiftlang/cache", home);
+            mkdir(cache_dir, 0755);
+            
+            // Generate cache filename based on module path and mtime
+            char* path_copy = strdup(absolute_path);
+            char* module_name = basename(path_copy);
+            snprintf(cache_path, sizeof(cache_path), "%s/%s-%ld.swiftbc", 
+                     cache_dir, module_name, file_stat_cache.st_mtime);
+            free(path_copy);
+            
+            // Try to load from cache
+            FILE* cache_file = fopen(cache_path, "rb");
+            if (cache_file) {
+                fseek(cache_file, 0, SEEK_END);
+                size_t cache_size = ftell(cache_file);
+                fseek(cache_file, 0, SEEK_SET);
+                
+                uint8_t* cache_data = malloc(cache_size);
+                if (fread(cache_data, 1, cache_size, cache_file) == cache_size) {
+                    if (bytecode_deserialize(cache_data, cache_size, module_chunk)) {
+                        loaded_from_cache = true;
+                        if (getenv("SWIFTLANG_DEBUG")) {
+                            fprintf(stderr, "[DEBUG] Loaded module from cache: %s\n", cache_path);
+                        }
+                    }
+                }
+                free(cache_data);
+                fclose(cache_file);
+            }
         }
-        if (!compile(program, module_chunk)) {
-            fprintf(stderr, "Failed to compile module: %s\n", absolute_path);
+        
+        // If not loaded from cache, parse and compile
+        if (!loaded_from_cache) {
+            // Parse the module source
+            // fprintf(stderr, "[DEBUG] Parsing module source...\n");
+            Lexer* lexer = lexer_create(source);
+            Parser* parser = parser_create(source);
+            
+            ProgramNode* program = parser_parse_program(parser);
+            if (parser->had_error) {
+                fprintf(stderr, "Failed to parse module: %s\n", absolute_path);
+                // TODO: ast_free_program(program);
+                lexer_destroy(lexer);
+                parser_destroy(parser);
+                free(source);
+                chunk_free(module_chunk);
+                free(module_chunk);
+                module->state = MODULE_STATE_ERROR;
+                return NULL;
+            }
+            
+            if (getenv("SWIFTLANG_DEBUG")) {
+                // fprintf(stderr, "[DEBUG] Module parsed successfully with %zu statements\n", 
+                //         program ? program->statement_count : 0);
+            }
+            
+            // Compile the module
+            if (getenv("SWIFTLANG_DEBUG")) {
+                // fprintf(stderr, "[DEBUG] Compiling module source...\n");
+            }
+            if (!compile(program, module_chunk)) {
+                fprintf(stderr, "Failed to compile module: %s\n", absolute_path);
+                // TODO: ast_free_program(program);
+                chunk_free(module_chunk);
+                free(module_chunk);
+                lexer_destroy(lexer);
+                parser_destroy(parser);
+                free(source);
+                module->state = MODULE_STATE_ERROR;
+                return NULL;
+            }
+            // fprintf(stderr, "[DEBUG] Module compiled successfully\n");
+            
+            // Save to cache if we have a cache path
+            if (home) {
+                uint8_t* bytecode_data;
+                size_t bytecode_size;
+                if (bytecode_serialize(module_chunk, &bytecode_data, &bytecode_size)) {
+                    FILE* cache_file = fopen(cache_path, "wb");
+                    if (cache_file) {
+                        fwrite(bytecode_data, 1, bytecode_size, cache_file);
+                        fclose(cache_file);
+                        if (getenv("SWIFTLANG_DEBUG")) {
+                            fprintf(stderr, "[DEBUG] Saved module to cache: %s\n", cache_path);
+                        }
+                    }
+                    free(bytecode_data);
+                }
+            }
+            
+            // Clean up parser resources
             // TODO: ast_free_program(program);
-            chunk_free(module_chunk);
-            free(module_chunk);
             lexer_destroy(lexer);
             parser_destroy(parser);
-            free(source);
-            module->state = MODULE_STATE_ERROR;
-            return NULL;
         }
-        // fprintf(stderr, "[DEBUG] Module compiled successfully\n");
         
         // Execute the module to populate exports
         VM* vm = loader->vm;
@@ -1563,8 +1916,6 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         free(module_chunk);
         // fprintf(stderr, "[DEBUG] After free module_chunk: module=%p state=%d\n", module, module->state);
         // TODO: ast_free_program(program);
-        lexer_destroy(lexer);
-        parser_destroy(parser);
         free(source);
         // fprintf(stderr, "[DEBUG] After all cleanup: module=%p state=%d\n", module, module->state);
         
@@ -1672,4 +2023,27 @@ void module_loader_init_stdlib(ModuleLoader* loader) {
     // - array
     // - file
     // - etc.
+}
+
+/**
+ * Check if a module version satisfies a requirement.
+ * @param required_version The version requirement (e.g., ">=1.0.0", "~>2.0")
+ * @param module_version The actual module version
+ * @return true if compatible, false otherwise
+ */
+static bool check_module_version_compatibility(const char* required_version, const char* module_version) {
+    if (!required_version || !module_version) {
+        // If no version specified, assume compatibility
+        return true;
+    }
+    
+    // Use version_satisfies from version.h
+    return version_satisfies(module_version, required_version);
+}
+
+/**
+ * Public API for checking module version compatibility.
+ */
+bool module_check_version_compatibility(const char* required_version, const char* module_version) {
+    return check_module_version_compatibility(required_version, module_version);
 }

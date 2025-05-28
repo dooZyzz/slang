@@ -112,6 +112,7 @@ bool cli_dir_exists(const char* path);
 bool cli_create_dir(const char* path);
 bool cli_create_dir_recursive(const char* path);
 char* cli_resolve_path(const char* path);
+bool cli_copy_file(const char* src, const char* dst);
 
 // Terminal utilities
 int cli_get_terminal_width(void);

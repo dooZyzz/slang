@@ -307,6 +307,7 @@ typedef struct {
     size_t specifier_count;
     bool is_native;              // True for native modules
     bool is_local;               // True for local imports (@ prefix)
+    bool import_all_to_scope;    // True for import * from module (vs import module)
     const char* alias;           // Import alias (e.g., import sys.io as io)
 } ImportDecl;
 

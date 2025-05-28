@@ -1,0 +1,7 @@
+{
+    "name": "test_lazy",
+    "version": "1.0.0",
+    "description": "Test module for lazy loading",
+    "main": "test_lazy.swift",
+    "type": "library"
+}

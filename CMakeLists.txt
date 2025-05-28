@@ -39,7 +39,8 @@ set(PARSER_SOURCES
 
 set(VM_SOURCES
     src/vm/vm.c
-        src/vm/object.c
+    src/vm/object.c
+    src/vm/object_hash.c
     src/vm/string_pool.c
 )
 
@@ -60,6 +61,7 @@ set(UTILS_SOURCES
     src/utils/compiler_wrapper.c
     src/utils/bytecode_format.c
     src/utils/hash_map.c
+    src/utils/version.c
 )
 
 set(SEMANTIC_SOURCES
@@ -77,6 +79,12 @@ set(RUNTIME_SOURCES
     src/runtime/module_format.c
     src/runtime/module_archive.c
     src/runtime/module_compiler.c
+    src/runtime/module_cache.c
+    src/runtime/module_hooks.c
+    src/runtime/module_unload.c
+    src/runtime/module_inspect.c
+    src/runtime/module_natives.c
+    src/runtime/module_bundle.c
     src/runtime/package_manager.c
     src/runtime/bootstrap.c
 )
@@ -154,6 +162,10 @@ add_executable(swiftlang src/main.c)
 
 target_link_libraries(swiftlang lang_lib)
 
+# Bundle tool for module deployment
+add_executable(swiftbundle src/tools/bundle.c)
+target_link_libraries(swiftbundle lang_lib)
+
 # Test module hierarchy
 # add_executable(test_module_hierarchy src/test_module_main.c)
 # target_link_libraries(test_module_hierarchy lang_lib)
@@ -196,3 +208,15 @@ endif()
 # Syntax test runner - commented out as file doesn't exist
 # add_executable(syntax_runner tests/syntax_runner.c)
 # target_link_libraries(syntax_runner lang_lib)
+
+# Time module (native interop)
+add_library(time_module SHARED modules/time/src/time_native.c)
+target_link_libraries(time_module lang_lib)
+set_target_properties(time_module PROPERTIES PREFIX "" OUTPUT_NAME "time")
+
+# Copy time module to build modules directory
+add_custom_command(TARGET time_module POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:time_module>
+    ${CMAKE_BINARY_DIR}/modules/time${CMAKE_SHARED_LIBRARY_SUFFIX}
+)

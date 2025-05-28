@@ -1,0 +1,11 @@
+{
+    "name": "database",
+    "version": "1.0.0",
+    "description": "Database module with connection pooling",
+    "main": "database.swift",
+    "type": "library",
+    "hooks": {
+        "init": "init_database",
+        "unload": "cleanup_database"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "name": "test_imports",
+    "version": "1.0.0",
+    "description": "Module for testing various import forms",
+    "main": "test_imports.swift",
+    "type": "module",
+    "sources": ["test_imports.swift"]
+}

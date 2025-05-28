@@ -1473,48 +1473,12 @@ static InterpretResult run(VM* vm)
                     // Push result
                     vm_push(vm, result);
                 }
-                else if (IS_FUNCTION(callee))
+                else if (IS_FUNCTION(callee) || IS_CLOSURE(callee))
                 {
-                    Function* function = AS_FUNCTION(callee);
-                    if (arg_count != function->arity)
-                    {
-                        runtime_error(vm, "Expected %d arguments but got %d.",
-                                      function->arity, arg_count);
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-
-                    // Check for stack overflow
-                    if (vm->frame_count == FRAMES_MAX)
-                    {
-                        runtime_error(vm, "Stack overflow.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-
-                    // Set up new call frame
-                    CallFrame* new_frame = &vm->frames[vm->frame_count++];
-                    new_frame->ip = function->chunk.code;
-                    new_frame->slots = vm->stack_top - arg_count - 1;
-                    new_frame->closure = NULL;  // Not a closure
-                    new_frame->saved_module = vm->current_module; // Save current module context
-
-                    // If this function belongs to a module, switch to that module's context
-                    if (function->module) {
-                        // fprintf(stderr, "[DEBUG] Function '%s' (from module '%s') being called\n",
-                        //         function->name, function->module->path);
-                        // fprintf(stderr, "[DEBUG]   Switching from module '%s' to '%s' (globals=%zu)\n",
-                        //         vm->current_module ? vm->current_module->path : "(none)",
-                        //         function->module->path, function->module->globals.count);
-                        vm->current_module = function->module;
-                    } else {
-                        // // fprintf(stderr, "[DEBUG] Function '%s' has no module reference\n", function->name);
-                    }
-
-                    // Frame will be updated at the start of next iteration
-                }
-                else if (callee.type == VAL_CLOSURE)
-                {
-                    Closure* closure = callee.as.closure;
-                    Function* function = closure->function;
+                    // Unified handling for both functions and closures
+                    Function* function = IS_FUNCTION(callee) ? AS_FUNCTION(callee) : AS_CLOSURE(callee)->function;
+                    Closure* closure = IS_CLOSURE(callee) ? AS_CLOSURE(callee) : NULL;
+                    
                     if (arg_count != function->arity)
                     {
                         runtime_error(vm, "Expected %d arguments but got %d.",
@@ -1595,9 +1559,27 @@ static InterpretResult run(VM* vm)
                     // // fprintf(stderr, "[DEBUG] OP_METHOD_CALL: method='%s', object_type=%d, is_struct=%d\n", 
                     //         function->name, object.type, IS_STRUCT(object));
                     
+                    /**
+                     * Module functions vs. regular methods:
+                     * 
+                     * When calling a method on an object, we need to distinguish between:
+                     * 1. Module functions: Functions exported from a module (e.g., math.sin())
+                     *    - These are regular functions that don't expect 'self'
+                     *    - The module object should NOT be passed as first argument
+                     * 
+                     * 2. Regular methods: Methods on structs/classes (e.g., person.getName())
+                     *    - These expect 'self' as the first argument
+                     *    - The object should be passed as first argument
+                     * 
+                     * We detect module functions by checking if the object is a plain Object
+                     * (not a struct instance). This allows module functions to work like
+                     * namespaced functions rather than methods.
+                     */
+                    bool is_module_function = IS_OBJECT(object) && !IS_STRUCT(object);
+                    
                     // Check arity
                     // For extension methods (name contains _ext_), arity includes 'this'
-                    // So we need to add 1 to arg_count when checking
+                    // For module functions, we don't pass the module as first arg
                     int expected_args = function->arity;
                     int actual_args = arg_count;
                     
@@ -1620,10 +1602,24 @@ static InterpretResult run(VM* vm)
                     
                     // Set up new call frame
                     // The stack has: [method, object, arg1, arg2, ...]
-                    // We want slots to point to method, so object is at slots[1] (self)
                     CallFrame* new_frame = &vm->frames[vm->frame_count++];
                     new_frame->ip = function->chunk.code;
-                    new_frame->slots = vm->stack_top - arg_count - 2; // -2 for method and object
+                    
+                    if (is_module_function) {
+                        // For module functions, we need to rearrange the stack
+                        // Current: [method, object, arg1, arg2, ...]
+                        // We want: [method, arg1, arg2, ...]
+                        // Remove the object from the stack
+                        TaggedValue* object_slot = vm->stack_top - arg_count - 1;
+                        for (int i = 0; i < arg_count; i++) {
+                            object_slot[i] = object_slot[i + 1];
+                        }
+                        vm->stack_top--;
+                        new_frame->slots = vm->stack_top - arg_count - 1; // -1 for method only
+                    } else {
+                        // Regular method call - object is at slots[1] (self)
+                        new_frame->slots = vm->stack_top - arg_count - 2; // -2 for method and object
+                    }
                     new_frame->saved_module = vm->current_module; // Save current module context
                     
                     // If this function belongs to a module, switch to that module's context
@@ -1716,10 +1712,22 @@ static InterpretResult run(VM* vm)
                     vm->module_loader = module_loader_create(vm);
                 }
                 
+                if (getenv("SWIFTLANG_DEBUG")) {
+                    fprintf(stderr, "[DEBUG VM] Loading module: %s\n", AS_STRING(module_path));
+                }
                 Module* module = module_load_relative(vm->module_loader, AS_STRING(module_path), false, vm->current_module_path);
-                if (!module || module->state != MODULE_STATE_LOADED) {
+                if (!module) {
                     runtime_error(vm, "Failed to load module: %s", AS_STRING(module_path));
                     return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                // Ensure module is initialized (handles lazy loading)
+                if (!ensure_module_initialized(module, vm)) {
+                    runtime_error(vm, "Failed to initialize module: %s", AS_STRING(module_path));
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                if (getenv("SWIFTLANG_DEBUG")) {
+                    fprintf(stderr, "[DEBUG VM] Module loaded, state=%d\n", module->state);
                 }
                 
                 // Push the module object
@@ -1766,8 +1774,14 @@ static InterpretResult run(VM* vm)
                 }
                 
                 Module* module = module_load_relative(vm->module_loader, AS_STRING(module_path), true, vm->current_module_path);
-                if (!module || module->state != MODULE_STATE_LOADED) {
+                if (!module) {
                     runtime_error(vm, "Failed to load native module: %s", AS_STRING(module_path));
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                // Native modules should already be initialized, but ensure anyway
+                if (!ensure_module_initialized(module, vm)) {
+                    runtime_error(vm, "Failed to initialize native module: %s", AS_STRING(module_path));
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 
@@ -1826,10 +1840,45 @@ static InterpretResult run(VM* vm)
                 break;
             }
             
+        case OP_IMPORT_ALL_FROM:
+            {
+                /**
+                 * Import all exports from a module into the current scope.
+                 * Stack: [module_object]
+                 * 
+                 * This iterates through all properties of the module object
+                 * and defines each as a global variable in the current scope.
+                 */
+                TaggedValue module_obj = vm_pop(vm);
+                
+                if (!IS_OBJECT(module_obj)) {
+                    runtime_error(vm, "Can only import from module objects");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                Object* module = AS_OBJECT(module_obj);
+                ObjectProperty* prop = module->properties;
+                
+                // Iterate through all module properties
+                while (prop) {
+                    // Check if global already exists
+                    int existing_idx = find_global(vm, prop->key);
+                    if (existing_idx != -1) {
+                        // Update existing global
+                        vm->globals.values[existing_idx] = *prop->value;
+                    } else {
+                        // Define new global
+                        define_global(vm, prop->key, *prop->value);
+                    }
+                    prop = prop->next;
+                }
+                break;
+            }
+            
         case OP_MODULE_EXPORT:
             {
                 if (getenv("SWIFTLANG_DEBUG")) {
-                    // fprintf(stderr, "[DEBUG] OP_MODULE_EXPORT executed\n");
+                    fprintf(stderr, "[DEBUG] OP_MODULE_EXPORT executed\n");
                 }
                 // Stack: [export_name, value]
                 TaggedValue value = vm_pop(vm);
@@ -1842,7 +1891,7 @@ static InterpretResult run(VM* vm)
                 
                 const char* name = AS_STRING(export_name);
                 if (getenv("SWIFTLANG_DEBUG")) {
-                    // fprintf(stderr, "[DEBUG] Exporting: %s\n", name);
+                    fprintf(stderr, "[DEBUG] Exporting: %s, current_module=%p\n", name, vm->current_module);
                 }
                 
                 // If exporting a function in a module context, set its module reference
@@ -2599,8 +2648,43 @@ static TaggedValue execute_single_function(VM* vm, int initial_frame_count)
     return NIL_VAL;
 }
 
-TaggedValue vm_call_function(VM* vm, Function* function, int arg_count, TaggedValue* args)
+/**
+ * Unified function for calling both functions and closures.
+ * 
+ * This function provides a single implementation for calling any callable value,
+ * eliminating code duplication between vm_call_function and vm_call_closure.
+ * It handles:
+ * - Argument validation (arity checking)
+ * - Stack overflow detection
+ * - Module context switching
+ * - Call frame setup
+ * - Proper cleanup and restoration of VM state
+ * 
+ * The function supports both regular functions and closures transparently,
+ * making the VM's calling convention more uniform and maintainable.
+ * 
+ * @param vm The VM instance
+ * @param callable A FUNCTION_VAL or CLOSURE_VAL to call
+ * @param arg_count Number of arguments being passed
+ * @param args Array of argument values
+ * @return The function's return value, or NIL_VAL on error
+ */
+static TaggedValue vm_call_callable(VM* vm, TaggedValue callable, int arg_count, TaggedValue* args)
 {
+    Function* function = NULL;
+    Closure* closure = NULL;
+    
+    // Extract the function from either a function or closure value
+    if (IS_FUNCTION(callable)) {
+        function = AS_FUNCTION(callable);
+    } else if (IS_CLOSURE(callable)) {
+        closure = AS_CLOSURE(callable);
+        function = closure->function;
+    } else {
+        // Not a callable value
+        return NIL_VAL;
+    }
+    
     // Check arity
     if (arg_count != function->arity) {
         // Arity mismatch
@@ -2623,8 +2707,8 @@ TaggedValue vm_call_function(VM* vm, Function* function, int arg_count, TaggedVa
         vm->current_module = function->module;
     }
     
-    // Push function value (required by VM calling convention)
-    vm_push(vm, FUNCTION_VAL(function));
+    // Push the callable value (required by VM calling convention)
+    vm_push(vm, callable);
     
     // Push arguments
     for (int i = 0; i < arg_count; i++) {
@@ -2635,14 +2719,11 @@ TaggedValue vm_call_function(VM* vm, Function* function, int arg_count, TaggedVa
     CallFrame* frame = &vm->frames[vm->frame_count++];
     frame->ip = function->chunk.code;
     frame->slots = vm->stack_top - arg_count - 1;
-    frame->closure = NULL;
+    frame->closure = closure;  // NULL for regular functions, actual closure for closures
+    frame->saved_module = saved_module;
     
     // Execute the function
     TaggedValue result = execute_single_function(vm, initial_frame_count);
-    
-    // Debug: check frame count after execution
-    // fprintf(stderr, "[DEBUG] vm_call_closure: After execute_single_function, frame_count=%d, initial=%d\n", 
-    //         vm->frame_count, initial_frame_count);
     
     // Clean up stack
     vm->stack_top = frame->slots;
@@ -2656,67 +2737,21 @@ TaggedValue vm_call_function(VM* vm, Function* function, int arg_count, TaggedVa
     return result;
 }
 
+/**
+ * Public wrapper for calling functions.
+ * Delegates to the unified vm_call_callable function.
+ */
+TaggedValue vm_call_function(VM* vm, Function* function, int arg_count, TaggedValue* args)
+{
+    return vm_call_callable(vm, FUNCTION_VAL(function), arg_count, args);
+}
+
+/**
+ * Public wrapper for calling closures.
+ * Delegates to the unified vm_call_callable function.
+ */
 TaggedValue vm_call_closure(VM* vm, Closure* closure, int arg_count, TaggedValue* args)
 {
-    // Debug output
-    // fprintf(stderr, "[DEBUG] vm_call_closure: closure=%p, function=%p, arity=%d, arg_count=%d\n",
-    //         (void*)closure, (void*)closure->function, closure->function->arity, arg_count);
-    
-    // Check arity
-    if (arg_count != closure->function->arity) {
-        // Arity mismatch
-        // fprintf(stderr, "[DEBUG] vm_call_closure: Arity mismatch\n");
-        return NIL_VAL;
-    }
-    
-    // Check for stack overflow
-    if (vm->frame_count == FRAMES_MAX) {
-        // fprintf(stderr, "[DEBUG] vm_call_closure: Stack overflow\n");
-        return NIL_VAL;
-    }
-    
-    // Save initial frame count
-    int initial_frame_count = vm->frame_count;
-    
-    // Save current module context
-    struct Module* saved_module = vm->current_module;
-    
-    // If this function belongs to a module, switch to that module's context
-    if (closure->function->module) {
-        vm->current_module = closure->function->module;
-    }
-    
-    // Push closure value
     TaggedValue closure_val = {.type = VAL_CLOSURE, .as.closure = closure};
-    vm_push(vm, closure_val);
-    
-    // Push arguments
-    for (int i = 0; i < arg_count; i++) {
-        vm_push(vm, args[i]);
-    }
-    
-    // Set up new call frame
-    CallFrame* frame = &vm->frames[vm->frame_count++];
-    frame->ip = closure->function->chunk.code;
-    frame->slots = vm->stack_top - arg_count - 1;
-    frame->closure = closure;
-    frame->saved_module = saved_module;
-    
-    // Execute the function
-    TaggedValue result = execute_single_function(vm, initial_frame_count);
-    
-    // Debug: check frame count after execution
-    // fprintf(stderr, "[DEBUG] vm_call_closure: After execute_single_function, frame_count=%d, initial=%d\n", 
-    //         vm->frame_count, initial_frame_count);
-    
-    // Clean up stack
-    vm->stack_top = frame->slots;
-    
-    // Restore frame count  
-    vm->frame_count = initial_frame_count;
-    
-    // Restore previous module context
-    vm->current_module = saved_module;
-    
-    return result;
+    return vm_call_callable(vm, closure_val, arg_count, args);
 }

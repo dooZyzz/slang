@@ -1,0 +1,7 @@
+{
+    "name": "test_exports",
+    "version": "1.0.0",
+    "description": "Performance test module with many exports",
+    "main": "test_exports.swift",
+    "type": "library"
+}

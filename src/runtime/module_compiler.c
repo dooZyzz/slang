@@ -248,18 +248,18 @@ bool module_compiler_build_package(ModuleCompiler* compiler,
         char lib_path[1024];
         snprintf(lib_path, sizeof(lib_path), "%s/%s", metadata->path, metadata->native.library);
         
-        printf("Checking for native library: %s\n", lib_path);
+        // printf("Checking for native library: %s\n", lib_path);
         if (stat(lib_path, &st) == 0) {
             const char* platform = module_archive_get_platform();
-            printf("Adding native library to archive: %s (platform: %s)\n", lib_path, platform);
+            // printf("Adding native library to archive: %s (platform: %s)\n", lib_path, platform);
             if (!module_archive_add_native_lib(archive, lib_path, platform)) {
-                printf("Failed to add native library to archive\n");
+                // printf("Failed to add native library to archive\n");
             }
         } else {
-            printf("Native library not found at: %s\n", lib_path);
+            // printf("Native library not found at: %s\n", lib_path);
         }
     } else {
-        printf("No native library specified in metadata\n");
+        // printf("No native library specified in metadata\n");
     }
     
     // Include source files if requested

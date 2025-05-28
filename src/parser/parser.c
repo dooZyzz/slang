@@ -1567,6 +1567,7 @@ static Stmt* import_declaration(Parser* parser)
             stmt = stmt_create_import(IMPORT_ALL, module_path);
             stmt->import_decl.is_local = is_local;
             stmt->import_decl.is_native = is_native;
+            stmt->import_decl.import_all_to_scope = true;  // Mark as import * from
             // No alias means import all exports into current scope
             stmt->import_decl.alias = NULL;
             free(module_path);

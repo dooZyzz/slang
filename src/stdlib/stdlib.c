@@ -1,4 +1,5 @@
 #include "stdlib/stdlib.h"
+#include "runtime/module_inspect.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@ void stdlib_set_vm(VM* vm) {
 
 // Main stdlib initialization
 void stdlib_init(VM* vm) {
+    
     // Initialize builtin prototypes first
     init_builtin_prototypes();
     
@@ -26,6 +28,9 @@ void stdlib_init(VM* vm) {
     stdlib_init_function_prototype(get_function_prototype());
     
     // Register global functions
+    
+    // Register module introspection natives
+    register_module_natives(vm);
     
     // Note: Global function registration would need to be done in vm_init
     // For now, these functions can be accessed through module imports

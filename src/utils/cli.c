@@ -6,16 +6,22 @@
 #include "vm/vm.h"
 #include "runtime/module.h"
 #include "runtime/package.h"
+#include "runtime/module_compiler.h"
+#include "runtime/module_hooks.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include <sys/ioctl.h>
 #include <getopt.h>
 #include <glob.h>
 #include <errno.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #include "debug/debug.h"
 // #include "ast/ast_printer.h" // TODO: Fix AST printer
@@ -418,6 +424,9 @@ int cli_main(int argc, char* argv[]) {
     // Initialize logger
     logger_init();
     
+    // Initialize module hooks system
+    module_hooks_init();
+    
     // Parse global options first
     cli_parse_args(argc, argv);
     
@@ -575,6 +584,8 @@ int cli_cmd_build(int argc, char* argv[]) {
     (void)argv;
     LOG_INFO(LOG_MODULE_CLI, "Building project");
     
+    cli_print_info("Starting build process...");
+    
     // Check for module.json
     if (!cli_file_exists("module.json")) {
         cli_print_error("No module.json found in current directory");
@@ -589,9 +600,68 @@ int cli_cmd_build(int argc, char* argv[]) {
         return 1;
     }
     
-    // TODO: Implement actual build logic
-    cli_print_info("Building project...");
-    cli_print_success("Build completed successfully!");
+    cli_print_info("Loading module metadata...");
+    
+    // Load module metadata
+    ModuleMetadata* metadata = package_load_module_metadata(".");
+    if (!metadata) {
+        cli_print_error("Failed to load module.json");
+        return 1;
+    }
+    
+    cli_print_info("Building module: %s", metadata->name);
+    
+    // Create module compiler
+    ModuleCompiler* compiler = module_compiler_create();
+    if (!compiler) {
+        cli_print_error("Failed to create module compiler");
+        package_free_module_metadata(metadata);
+        return 1;
+    }
+    
+    // Set output path
+    char output_path[PATH_MAX];
+    snprintf(output_path, sizeof(output_path), "%s/%s.swiftmodule", 
+             build_dir, metadata->name);
+    
+    // Build options
+    ModuleCompilerOptions options = {
+        .optimize = g_cli_config.optimize,
+        .strip_debug = !g_cli_config.debug_bytecode,
+        .include_source = false,
+        .output_dir = build_dir
+    };
+    
+    // Build the module
+    if (!module_compiler_build_package(compiler, metadata, output_path, &options)) {
+        cli_print_error("Build failed: %s", module_compiler_get_error(compiler));
+        module_compiler_destroy(compiler);
+        package_free_module_metadata(metadata);
+        return 1;
+    }
+    
+    module_compiler_destroy(compiler);
+    package_free_module_metadata(metadata);
+    
+    cli_print_success("Module built successfully: %s", output_path);
+    
+    // Copy to global cache
+    const char* home = getenv("HOME");
+    if (home) {
+        char cache_path[PATH_MAX];
+        snprintf(cache_path, sizeof(cache_path), "%s/.swiftlang/modules/%s.swiftmodule",
+                 home, metadata->name);
+        
+        // Create cache directory
+        char cache_dir[PATH_MAX];
+        snprintf(cache_dir, sizeof(cache_dir), "%s/.swiftlang/modules", home);
+        cli_create_dir_recursive(cache_dir);
+        
+        // Copy module
+        if (cli_copy_file(output_path, cache_path)) {
+            cli_print_info("Module cached to: %s", cache_path);
+        }
+    }
     
     return 0;
 }
@@ -753,6 +823,31 @@ bool cli_create_dir_recursive(const char* path) {
 
 char* cli_resolve_path(const char* path) {
     return realpath(path, NULL);
+}
+
+bool cli_copy_file(const char* src, const char* dst) {
+    FILE* src_file = fopen(src, "rb");
+    if (!src_file) return false;
+    
+    FILE* dst_file = fopen(dst, "wb");
+    if (!dst_file) {
+        fclose(src_file);
+        return false;
+    }
+    
+    char buffer[4096];
+    size_t bytes;
+    while ((bytes = fread(buffer, 1, sizeof(buffer), src_file)) > 0) {
+        if (fwrite(buffer, 1, bytes, dst_file) != bytes) {
+            fclose(src_file);
+            fclose(dst_file);
+            return false;
+        }
+    }
+    
+    fclose(src_file);
+    fclose(dst_file);
+    return true;
 }
 
 int cli_get_terminal_width(void) {
@@ -937,9 +1032,9 @@ static bool needs_more_input(const char* input) {
 
 void cli_run_repl(void) {
     const int MAX_LINE = 1024;
-    const int MAX_INPUT = 8192;
+    const int MAX_INPUT_SIZE = 8192;
     char line[MAX_LINE];
-    char input[MAX_INPUT];
+    char input[MAX_INPUT_SIZE];
     
     VM vm;
     vm_init(&vm);
@@ -1111,6 +1206,33 @@ int cli_run_file(const char* path) {
     for (int i = 0; i < g_cli_config.module_path_count; i++) {
         module_loader_add_search_path(vm.module_loader, g_cli_config.module_paths[i]);
     }
+    
+    // Add default search paths
+    // Add modules directory relative to executable
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len == -1) {
+        // macOS doesn't have /proc/self/exe, use different method
+        uint32_t size = sizeof(exe_path);
+        if (_NSGetExecutablePath(exe_path, &size) == 0) {
+            len = strlen(exe_path);
+        }
+    }
+    if (len > 0) {
+        exe_path[len] = '\0';
+        char* last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            char modules_path[PATH_MAX];
+            snprintf(modules_path, sizeof(modules_path), "%s/modules", exe_path);
+            module_loader_add_search_path(vm.module_loader, modules_path);
+            LOG_DEBUG(LOG_MODULE_CLI, "Added modules search path: %s", modules_path);
+        }
+    }
+    
+    // Add project modules directory
+    module_loader_add_search_path(vm.module_loader, "./modules");
+    module_loader_add_search_path(vm.module_loader, "modules");
     
     // Set current module path for relative imports
     vm.current_module_path = path;

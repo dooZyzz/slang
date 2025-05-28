@@ -1,0 +1,12 @@
+{
+    "name": "dependency_example",
+    "version": "1.0.0",
+    "description": "Example module with dependencies",
+    "main": "main.swift",
+    "type": "module",
+    "sources": ["main.swift"],
+    "dependencies": {
+        "hello": "^1.0.0",
+        "test_imports": "^1.0.0"
+    }
+}

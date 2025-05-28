@@ -308,6 +308,7 @@ Stmt* stmt_create_import(ImportType type, const char* module_path) {
     stmt->import_decl.specifier_count = 0;
     stmt->import_decl.is_native = false;
     stmt->import_decl.is_local = false;
+    stmt->import_decl.import_all_to_scope = false;
     stmt->import_decl.alias = NULL;
     return stmt;
 }

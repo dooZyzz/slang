@@ -1,0 +1,8 @@
+{
+    "name": "time",
+    "version": "1.0.0",
+    "description": "Time and date utilities with native performance",
+    "main": "src/time.swift",
+    "type": "module",
+    "sources": ["src/time.swift"]
+}

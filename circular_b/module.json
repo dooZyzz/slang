@@ -1,0 +1,8 @@
+{
+    "name": "circular_b",
+    "version": "1.0.0",
+    "description": "Module B for circular dependency test",
+    "main": "circular_b.swift",
+    "type": "module",
+    "sources": ["circular_b.swift"]
+}

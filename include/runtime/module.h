@@ -30,6 +30,7 @@ typedef struct ModuleScope {
 typedef struct Module {
     const char* path;
     const char* absolute_path;
+    const char* version;  // Module version (e.g., "1.0.0")
     ModuleState state;
     
     // Module scope (all definitions with export flags)
@@ -62,6 +63,9 @@ typedef struct Module {
     
     // Module initialization function for native modules
     bool (*init_fn)(struct Module* module);
+    
+    // For lazy loading
+    Chunk* chunk;  // Stored bytecode for lazy execution
 } Module;
 
 // Module loader types for hierarchy
@@ -133,5 +137,18 @@ void module_register_native_function(Module* module, const char* name, NativeFn 
 
 // Standard library modules
 void module_loader_init_stdlib(ModuleLoader* loader);
+
+// Lazy loading support
+bool ensure_module_initialized(Module* module, VM* vm);
+
+// Version compatibility
+bool module_check_version_compatibility(const char* required_version, const char* module_version);
+
+// Module unloading
+void module_unload(Module* module, VM* vm);
+bool module_loader_unload(ModuleLoader* loader, const char* module_name);
+void module_loader_unload_all(ModuleLoader* loader);
+bool module_can_unload(Module* module);
+void module_force_unload(Module* module, VM* vm);
 
 #endif

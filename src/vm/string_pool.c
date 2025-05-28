@@ -139,7 +139,7 @@ void string_pool_mark(StringPool* pool, char* string) {
     }
 }
 
-void string_pool_6sweep(StringPool* pool) {
+void string_pool_sweep(StringPool* pool) {
     StringEntry** current = &pool->all_strings;
     
     while (*current) {
