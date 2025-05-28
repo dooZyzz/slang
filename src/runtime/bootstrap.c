@@ -1,5 +1,6 @@
 #include "runtime/bootstrap.h"
 #include "runtime/module.h"
+#include "runtime/module_cache.h"
 #include "vm/vm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,13 +107,8 @@ ModuleLoader* bootstrap_loader_create(VM* vm) {
     // Create and cache the built-ins module
     Module* builtins = bootstrap_create_builtins_module(vm);
     
-    // Add to cache
-    if (loader->cache.count >= loader->cache.capacity) {
-        loader->cache.capacity *= 2;
-        loader->cache.modules = realloc(loader->cache.modules,
-                                       loader->cache.capacity * sizeof(Module*));
-    }
-    loader->cache.modules[loader->cache.count++] = builtins;
+    // Add to cache using the cache API
+    module_cache_put(loader->cache, "__builtins__", builtins);
     
     return loader;
 }

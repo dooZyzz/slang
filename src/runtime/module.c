@@ -56,6 +56,7 @@
 #include "utils/version.h"
 #include "runtime/module_hooks.h"
 #include "runtime/module_inspect.h"
+#include "runtime/module_cache.h"
 
 // Constants
 #define MODULE_NAME_BUFFER_SIZE 512
@@ -815,10 +816,9 @@ ModuleLoader* module_loader_create_with_hierarchy(ModuleLoaderType type, const c
     // fprintf(stderr, "[DEBUG] Created loader=%p with type=%d, name=%s\n", 
     //         loader, loader->type, loader->name ? loader->name : "(null)");
     
-    // Initialize cache
-    loader->cache.capacity = 16;
-    loader->cache.modules = calloc(loader->cache.capacity, sizeof(Module*));
-    // fprintf(stderr, "[DEBUG] Initialized cache with capacity=%zu\n", loader->cache.capacity);
+    // Initialize module cache
+    loader->cache = module_cache_create();
+    MODULE_DEBUG("Initialized module cache\n");
     
     // Initialize search paths
     loader->search_paths.capacity = 8;
@@ -888,10 +888,8 @@ void module_loader_destroy(ModuleLoader* loader) {
     }
     
     // Free cache
-    for (size_t i = 0; i < loader->cache.count; i++) {
-        // TODO: Properly free modules
-    }
-    free(loader->cache.modules);
+    // Note: modules are freed separately, cache just holds references
+    module_cache_destroy(loader->cache);
     
     // Free search paths
     for (size_t i = 0; i < loader->search_paths.count; i++) {
@@ -921,10 +919,9 @@ void module_loader_add_search_path(ModuleLoader* loader, const char* path) {
 
 Module* module_get_cached(ModuleLoader* loader, const char* path) {
     // Check current loader's cache
-    for (size_t i = 0; i < loader->cache.count; i++) {
-        if (strcmp(loader->cache.modules[i]->path, path) == 0) {
-            return loader->cache.modules[i];
-        }
+    Module* module = module_cache_get(loader->cache, path);
+    if (module) {
+        return module;
     }
     
     // Not found, check parent loader if exists
@@ -936,13 +933,7 @@ Module* module_get_cached(ModuleLoader* loader, const char* path) {
 }
 
 static void cache_module(ModuleLoader* loader, Module* module) {
-    if (loader->cache.count >= loader->cache.capacity) {
-        loader->cache.capacity *= 2;
-        loader->cache.modules = realloc(loader->cache.modules,
-                                       loader->cache.capacity * sizeof(Module*));
-    }
-    
-    loader->cache.modules[loader->cache.count++] = module;
+    module_cache_put(loader->cache, module->path, module);
 }
 
 Module* module_load(ModuleLoader* loader, const char* path, bool is_native) {

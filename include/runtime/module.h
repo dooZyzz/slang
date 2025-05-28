@@ -76,18 +76,17 @@ typedef enum {
     MODULE_LOADER_CHILD        // Dynamic child loaders
 } ModuleLoaderType;
 
+// Forward declaration for module cache
+typedef struct ModuleCache ModuleCache;
+
 typedef struct ModuleLoader {
     // Loader hierarchy
     ModuleLoaderType type;
     const char* name;
     struct ModuleLoader* parent;  // Parent loader for delegation
     
-    // Loaded modules cache
-    struct {
-        Module** modules;
-        size_t count;
-        size_t capacity;
-    } cache;
+    // Module cache (thread-safe implementation)
+    ModuleCache* cache;
     
     // Module search paths
     struct {

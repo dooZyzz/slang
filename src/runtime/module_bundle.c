@@ -45,7 +45,6 @@ typedef struct Bundle {
     char* path;
     mz_zip_archive zip;
     BundleMetadata metadata;
-    HashMap* module_cache;      // Cached loaded modules
 } Bundle;
 
 // Helper: Create directory
@@ -402,7 +401,6 @@ void* bundle_open(const char* bundle_path) {
     
     Bundle* bundle = calloc(1, sizeof(Bundle));
     bundle->path = strdup(bundle_path);
-    bundle->module_cache = hash_map_create();
     
     // Open ZIP archive
     memset(&bundle->zip, 0, sizeof(bundle->zip));
@@ -442,10 +440,11 @@ Module* bundle_load_module(void* bundle_ptr, const char* module_name, ModuleLoad
         return NULL;
     }
     
-    // Check cache first
-    Module* cached = (Module*)hash_map_get(bundle->module_cache, module_name);
-    if (cached) {
-        return cached;
+    // Module caching is handled by ModuleLoader
+    // Check if already loaded
+    Module* existing = module_get_cached(loader, module_name);
+    if (existing) {
+        return existing;
     }
     
     // Extract module to temporary file
@@ -475,10 +474,7 @@ Module* bundle_load_module(void* bundle_ptr, const char* module_name, ModuleLoad
     
     // Load module from temporary file
     Module* module = module_load(loader, temp_path, false);
-    if (module) {
-        // Cache the loaded module
-        hash_map_put(bundle->module_cache, module_name, module);
-    }
+    // Module will be cached by the loader
     
     // Clean up temporary file
     unlink(temp_path);
@@ -543,8 +539,7 @@ void bundle_close(void* bundle_ptr) {
     
     mz_zip_reader_end(&bundle->zip);
     
-    // Don't free cached modules - they're owned by module loader
-    hash_map_destroy(bundle->module_cache);
+    // Module cache is managed by ModuleLoader
     
     free(bundle->path);
     free(bundle->metadata.name);
