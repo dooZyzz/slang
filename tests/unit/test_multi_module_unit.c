@@ -4,10 +4,10 @@
 #include <stdlib.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
-#include "runtime/package.h"
-#include "runtime/module.h"
-#include "vm/vm.h"
-#include "vm/object.h"
+#include "runtime/packages/package.h"
+#include "runtime/modules/loader/module_loader.h"
+#include "runtime/core/vm.h"
+#include "runtime/core/object.h"
 
 // Test loading module metadata with multiple modules
 DEFINE_TEST(load_multi_module_metadata) {

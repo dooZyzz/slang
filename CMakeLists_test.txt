@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.10)
+project(SwiftLikeLang C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic -Wno-newline-eof")
+include_directories(include)
+
+# Test just the core refactored components
+set(CORE_SOURCES
+    # Memory system (not refactored, original works)
+    src/utils/memory.c
+    src/utils/memory_platform.c
+    src/utils/memory_arena.c
+    src/utils/memory_freelist.c
+    src/utils/memory_trace.c
+    src/utils/allocators.c
+    
+    # Core refactored files
+    src/runtime/core/string_pool_complete_refactored.c
+    src/runtime/core/object_complete_refactored.c
+    src/runtime/core/object_hash_refactored.c
+    
+    # Hash map (both versions for compatibility)
+    src/utils/hash_map.c
+    src/utils/hash_map_v2.c
+)
+
+# Simple test executable
+add_executable(test_refactored test_simple.c ${CORE_SOURCES})
+
+# Link with system libraries
+target_link_libraries(test_refactored ${CMAKE_DL_LIBS})

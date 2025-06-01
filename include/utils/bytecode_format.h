@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 // SwiftLang Bytecode Format (.swiftbc)
 // 

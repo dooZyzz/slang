@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
-#include "vm/object.h"
-#include "vm/vm.h"
+#include "runtime/core/object.h"
+#include "runtime/core/vm.h"
 
 // Test object creation and destruction
 DEFINE_TEST(create_destroy_object)

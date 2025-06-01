@@ -232,8 +232,8 @@ DEFINE_TEST(error_handling) {
     
     lexer_destroy(lexer1);
     
-    // Test invalid character
-    const char* source2 = "@#$";
+    // Test invalid character - use a character that's not in the language
+    const char* source2 = "§"; // Section sign, not a valid Swift character
     Lexer* lexer2 = lexer_create(source2);
     TEST_ASSERT_NOT_NULL(suite, lexer2, "error_handling");
     

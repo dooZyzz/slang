@@ -1,8 +1,8 @@
 #ifndef STDLIB_H
 #define STDLIB_H
 
-#include "vm/vm.h"
-#include "vm/object.h"
+#include "runtime/core/vm.h"
+#include "runtime/core/object.h"
 
 // Stdlib modules would be included here when added to build
 // #include "stdlib/file.h"

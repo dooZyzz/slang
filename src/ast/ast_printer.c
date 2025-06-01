@@ -52,17 +52,20 @@ static void print_expr(Expr* expr) {
     
     switch (expr->type) {
         case EXPR_LITERAL:
-            switch (expr->literal.value.type) {
-                case VAL_NUMBER:
-                    printf("%.2f", expr->literal.value.as.number);
+            switch (expr->literal.type) {
+                case LITERAL_FLOAT:
+                    printf("%.2f", expr->literal.value.floating);
                     break;
-                case VAL_STRING:
-                    printf("\"%s\"", expr->literal.value.as.string);
+                case LITERAL_INT:
+                    printf("%lld", expr->literal.value.integer);
                     break;
-                case VAL_BOOL:
-                    printf("%s", expr->literal.value.as.boolean ? "true" : "false");
+                case LITERAL_STRING:
+                    printf("\"%s\"", expr->literal.value.string.value);
                     break;
-                case VAL_NIL:
+                case LITERAL_BOOL:
+                    printf("%s", expr->literal.value.boolean ? "true" : "false");
+                    break;
+                case LITERAL_NIL:
                     printf("nil");
                     break;
                 default:
@@ -166,7 +169,7 @@ static void print_stmt(Stmt* stmt) {
     
     switch (stmt->type) {
         case STMT_EXPRESSION:
-            print_expr(stmt->expression.expr);
+            print_expr(stmt->expression.expression);
             printf(";\n");
             break;
             
@@ -259,9 +262,9 @@ static void print_stmt(Stmt* stmt) {
             
         case STMT_RETURN:
             printf("return");
-            if (stmt->return_stmt.value) {
+            if (stmt->return_stmt.expression) {
                 printf(" ");
-                print_expr(stmt->return_stmt.value);
+                print_expr(stmt->return_stmt.expression);
             }
             printf(";\n");
             break;
@@ -287,21 +290,23 @@ static void print_stmt(Stmt* stmt) {
             switch (stmt->export_decl.type) {
                 case EXPORT_DEFAULT:
                     printf("default ");
-                    print_expr(stmt->export_decl.default_export);
+                    printf("%s", stmt->export_decl.default_export.name);
                     break;
                 case EXPORT_NAMED:
                     printf("{ ");
                     for (size_t i = 0; i < stmt->export_decl.named_export.specifier_count; i++) {
                         if (i > 0) printf(", ");
-                        printf("%s", stmt->export_decl.named_export.specifiers[i].local_name);
-                        if (stmt->export_decl.named_export.specifiers[i].exported_name) {
-                            printf(" as %s", stmt->export_decl.named_export.specifiers[i].exported_name);
+                        printf("%s", stmt->export_decl.named_export.specifiers[i].name);
+                        if (stmt->export_decl.named_export.specifiers[i].alias) {
+                            printf(" as %s", stmt->export_decl.named_export.specifiers[i].alias);
                         }
                     }
                     printf(" }");
                     break;
                 case EXPORT_DECLARATION:
-                    print_stmt(stmt->export_decl.decl_export);
+                    // Export declaration is a Decl*, not Stmt*
+                    printf("<export declaration>");
+                    // TODO: Add print_decl function to handle Decl* types
                     return; // Already printed newline
                 case EXPORT_ALL:
                     printf("*");

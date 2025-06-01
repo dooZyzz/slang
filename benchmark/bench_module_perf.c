@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
-#include "vm/object.h"
-#include "vm/object_hash.h"
-#include "vm/vm.h"
+#include "runtime/core/object.h"
+#include "runtime/core/object_hash.h"
+#include "runtime/core/vm.h"
 
 // Get current time in microseconds
 static double get_time_us() {

@@ -1,7 +1,7 @@
 #include "codegen/compiler.h"
 #include "semantic/visitor.h"
 #include "ast/ast.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

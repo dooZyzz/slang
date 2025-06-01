@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <stdbool.h>
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "ast/ast.h"
 
 // Disassembler for bytecode

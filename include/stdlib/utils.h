@@ -1,7 +1,7 @@
 #ifndef STDLIB_UTILS_H
 #define STDLIB_UTILS_H
 
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 // System functions
 TaggedValue sys_exit(int arg_count, TaggedValue* args);

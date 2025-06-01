@@ -4,11 +4,11 @@
 #include <stdlib.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
-#include "runtime/package.h"
-#include "runtime/module.h"
-#include "runtime/module_format.h"
-#include "vm/vm.h"
-#include "vm/object.h"
+#include "runtime/packages/package.h"
+#include "runtime/modules/loader/module_loader.h"
+#include "runtime/modules/formats/module_format.h"
+#include "runtime/core/vm.h"
+#include "runtime/core/object.h"
 
 // Test module metadata loading
 DEFINE_TEST(load_module_metadata) {

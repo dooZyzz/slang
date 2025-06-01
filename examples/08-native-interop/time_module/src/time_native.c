@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>  // For gettimeofday on macOS
-#include "vm/vm.h"
-#include "vm/object.h"
+#include "runtime/core/vm.h"
+#include "runtime/core/object.h"
 
 // Native function to get current timestamp
 static TaggedValue native_time_now(int arg_count, TaggedValue* args) {

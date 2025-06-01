@@ -3,8 +3,8 @@
 #include <string.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
-#include "vm/vm.h"
-#include "vm/object.h"
+#include "runtime/core/vm.h"
+#include "runtime/core/object.h"
 
 DEFINE_TEST(stack_operations) {
     VM vm;

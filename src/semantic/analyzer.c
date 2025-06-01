@@ -1,5 +1,5 @@
 #include "semantic/analyzer.h"
-#include "runtime/builtin_modules.h"
+#include "runtime/modules/lifecycle/builtin_modules.h"
 #include <stdlib.h>
 #include <string.h>
 

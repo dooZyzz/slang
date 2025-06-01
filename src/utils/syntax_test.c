@@ -1,7 +1,7 @@
 #include "utils/syntax_test.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "utils/error.h"
 #include <stdio.h>
 #include <stdlib.h>

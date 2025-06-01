@@ -1,5 +1,5 @@
 #include "stdlib/stdlib.h"
-#include "runtime/module_inspect.h"
+#include "runtime/modules/extensions/module_inspect.h"
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -37,9 +37,75 @@ void stdlib_init(VM* vm) {
     // or added to a global object
 }
 
+// Object prototype method implementations
+static TaggedValue object_toString_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 1) return NIL_VAL;
+    
+    TaggedValue self = args[0];
+    
+    if (IS_NIL(self)) {
+        return STRING_VAL("nil");
+    } else if (IS_BOOL(self)) {
+        return STRING_VAL(AS_BOOL(self) ? "true" : "false");
+    } else if (IS_NUMBER(self)) {
+        char buffer[32];
+        double num = AS_NUMBER(self);
+        if (num == (int)num) {
+            snprintf(buffer, sizeof(buffer), "%d", (int)num);
+        } else {
+            snprintf(buffer, sizeof(buffer), "%.14g", num);
+        }
+        return STRING_VAL(strdup(buffer));
+    } else if (IS_STRING(self)) {
+        return self; // Strings return themselves
+    } else if (IS_OBJECT(self)) {
+        Object* obj = AS_OBJECT(self);
+        if (obj->is_array) {
+            // For arrays, create a string representation
+            return STRING_VAL("[Array]");
+        } else {
+            return STRING_VAL("[Object]");
+        }
+    } else if (IS_FUNCTION(self) || IS_CLOSURE(self) || IS_NATIVE(self)) {
+        return STRING_VAL("[Function]");
+    }
+    
+    return STRING_VAL("[Unknown]");
+}
+
+static TaggedValue object_valueOf_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 1) return NIL_VAL;
+    
+    // valueOf returns the primitive value of the object
+    // For most objects, this is just the object itself
+    return args[0];
+}
+
+static TaggedValue object_hasOwnProperty_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 2 || !IS_OBJECT(args[0]) || !IS_STRING(args[1])) {
+        return BOOL_VAL(false);
+    }
+    
+    Object* obj = AS_OBJECT(args[0]);
+    const char* prop_name = AS_STRING(args[1]);
+    
+    // Check if the property exists directly on this object (not prototype)
+    ObjectProperty* prop = obj->properties;
+    while (prop != NULL) {
+        if (strcmp(prop->key, prop_name) == 0) {
+            return BOOL_VAL(true);
+        }
+        prop = prop->next;
+    }
+    
+    return BOOL_VAL(false);
+}
+
 // Object prototype methods
 void stdlib_init_object_prototype(Object* proto) {
-    // TODO: Add toString, valueOf, hasOwnProperty, etc.
+    object_set_property(proto, "toString", NATIVE_VAL(object_toString_method));
+    object_set_property(proto, "valueOf", NATIVE_VAL(object_valueOf_method));
+    object_set_property(proto, "hasOwnProperty", NATIVE_VAL(object_hasOwnProperty_method));
 }
 
 // Array prototype methods
@@ -71,9 +137,121 @@ void stdlib_init_string_prototype(Object* proto) {
     object_set_property(proto, "trim", NATIVE_VAL(string_trim_method));
 }
 
+// Function prototype method implementations
+static TaggedValue function_call_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 1 || !IS_FUNCTION(args[0])) {
+        return NIL_VAL;
+    }
+    
+    // First argument is the function itself
+    // Second argument is 'this' context
+    // Rest are arguments to pass to the function
+    TaggedValue func = args[0];
+    TaggedValue this_arg = (arg_count > 1) ? args[1] : NIL_VAL;
+    
+    // Prepare arguments for the function call
+    int func_arg_count = arg_count - 2;  // Exclude function and 'this'
+    TaggedValue* func_args = NULL;
+    
+    if (func_arg_count > 0) {
+        func_args = malloc(sizeof(TaggedValue) * (func_arg_count + 1));
+        func_args[0] = this_arg;  // 'this' is always the first argument
+        for (int i = 0; i < func_arg_count; i++) {
+            func_args[i + 1] = args[i + 2];
+        }
+    } else {
+        func_args = malloc(sizeof(TaggedValue));
+        func_args[0] = this_arg;
+        func_arg_count = 0;
+    }
+    
+    // Call the function
+    TaggedValue result;
+    if (IS_NATIVE(func)) {
+        NativeFn native = AS_NATIVE(func);
+        result = native(func_arg_count + 1, func_args);
+    } else {
+        // For user-defined functions, we'd need VM integration
+        // For now, return nil
+        result = NIL_VAL;
+    }
+    
+    free(func_args);
+    return result;
+}
+
+static TaggedValue function_apply_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 2 || !IS_FUNCTION(args[0])) {
+        return NIL_VAL;
+    }
+    
+    // First argument is the function itself
+    // Second argument is 'this' context
+    // Third argument is an array of arguments
+    TaggedValue func = args[0];
+    TaggedValue this_arg = args[1];
+    
+    // Get arguments from array
+    int func_arg_count = 0;
+    TaggedValue* func_args = NULL;
+    
+    if (arg_count >= 3 && IS_OBJECT(args[2])) {
+        Object* arg_array = AS_OBJECT(args[2]);
+        if (arg_array->is_array) {
+            func_arg_count = (int)array_length(arg_array);
+            func_args = malloc(sizeof(TaggedValue) * (func_arg_count + 1));
+            func_args[0] = this_arg;  // 'this' is always the first argument
+            
+            for (int i = 0; i < func_arg_count; i++) {
+                func_args[i + 1] = array_get(arg_array, i);
+            }
+        }
+    }
+    
+    if (func_args == NULL) {
+        func_args = malloc(sizeof(TaggedValue));
+        func_args[0] = this_arg;
+        func_arg_count = 0;
+    }
+    
+    // Call the function
+    TaggedValue result;
+    if (IS_NATIVE(func)) {
+        NativeFn native = AS_NATIVE(func);
+        result = native(func_arg_count + 1, func_args);
+    } else {
+        // For user-defined functions, we'd need VM integration
+        result = NIL_VAL;
+    }
+    
+    free(func_args);
+    return result;
+}
+
+static TaggedValue function_bind_method(int arg_count, TaggedValue* args) {
+    if (arg_count < 2 || !IS_FUNCTION(args[0])) {
+        return NIL_VAL;
+    }
+    
+    // For now, we can't create true bound functions without VM support
+    // This would require creating a new function object that captures
+    // the 'this' context and any pre-bound arguments
+    
+    // TODO: Implement proper function binding when VM supports closures
+    // For now, just return the original function
+    return args[0];
+}
+
 // Function prototype methods
 void stdlib_init_function_prototype(Object* proto) {
-    // TODO: Add call, apply, bind
+    // Add call method
+    object_set_property(proto, "call", NATIVE_VAL(function_call_method));
+    
+    // Add apply method
+    object_set_property(proto, "apply", NATIVE_VAL(function_apply_method));
+    
+    // Add bind method
+    object_set_property(proto, "bind", NATIVE_VAL(function_bind_method));
 }
 
 // Array method implementations

@@ -7,7 +7,7 @@
 #include "parser/parser.h"
 #include "semantic/analyzer.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "ast/ast.h"
 #include "utils/error.h"
 

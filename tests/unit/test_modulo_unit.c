@@ -4,7 +4,7 @@
 #include "utils/test_macros.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 DEFINE_TEST(basic_modulo) {
     const char* source = "5 % 2;";

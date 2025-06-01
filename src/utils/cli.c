@@ -3,11 +3,11 @@
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
-#include "runtime/module.h"
-#include "runtime/package.h"
-#include "runtime/module_compiler.h"
-#include "runtime/module_hooks.h"
+#include "runtime/core/vm.h"
+#include "runtime/modules/loader/module_loader.h"
+#include "runtime/packages/package.h"
+#include "runtime/modules/loader/module_compiler.h"
+#include "runtime/modules/extensions/module_hooks.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +24,8 @@
 #endif
 
 #include "debug/debug.h"
-// #include "ast/ast_printer.h" // TODO: Fix AST printer
+#include "ast/ast_printer.h"
+#include "utils/bytecode_format.h"
 
 // Global CLI configuration
 CLIConfig g_cli_config = {
@@ -674,8 +675,13 @@ int cli_cmd_run(int argc, char* argv[]) {
         file_to_run = argv[1];
     } else if (cli_file_exists("module.json")) {
         // Try to run project main file
-        // TODO: Parse module.json to get main file
-        file_to_run = "main.swift";
+        ModuleMetadata* metadata = package_load_module_metadata(".");
+        if (metadata && metadata->main_file) {
+            file_to_run = metadata->main_file;
+        } else {
+            file_to_run = "main.swift";
+        }
+        // Don't free metadata yet as we're using its main_file string
     }
     
     if (!file_to_run) {
@@ -1165,9 +1171,7 @@ int cli_run_file(const char* path) {
     // Print AST if requested
     if (g_cli_config.debug_ast) {
         printf("\n=== AST ===\n");
-        printf("AST printing is not yet fully implemented\n");
-        // TODO: Fix ast_print_program to match current AST structure
-        // ast_print_program(program);
+        ast_print_program(program);
         printf("\n");
     }
     
@@ -1194,8 +1198,22 @@ int cli_run_file(const char* path) {
     if (g_cli_config.emit_bytecode) {
         char bytecode_path[1024];
         snprintf(bytecode_path, sizeof(bytecode_path), "%s.bc", path);
-        // TODO: Implement bytecode serialization
-        LOG_DEBUG(LOG_MODULE_CLI, "Would save bytecode to: %s", bytecode_path);
+        
+        uint8_t* bytecode_data;
+        size_t bytecode_size;
+        if (bytecode_serialize(&chunk, &bytecode_data, &bytecode_size)) {
+            FILE* f = fopen(bytecode_path, "wb");
+            if (f) {
+                fwrite(bytecode_data, 1, bytecode_size, f);
+                fclose(f);
+                cli_print_success("Bytecode saved to: %s", bytecode_path);
+            } else {
+                cli_print_error("Failed to save bytecode to: %s", bytecode_path);
+            }
+            free(bytecode_data);
+        } else {
+            cli_print_error("Failed to serialize bytecode");
+        }
     }
     
     // Create VM and run

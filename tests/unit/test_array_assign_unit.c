@@ -4,7 +4,7 @@
 #include "utils/test_macros.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 DEFINE_TEST(array_index_assignment) {
     const char* source = 

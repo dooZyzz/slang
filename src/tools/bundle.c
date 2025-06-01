@@ -1,4 +1,4 @@
-#include "runtime/module_bundle.h"
+#include "runtime/modules/formats/module_bundle.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

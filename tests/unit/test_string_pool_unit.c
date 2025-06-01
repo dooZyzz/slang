@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
-#include "vm/string_pool.h"
+#include "runtime/core/string_pool.h"
 
 // Test string pool initialization and cleanup
 DEFINE_TEST(init_and_free)

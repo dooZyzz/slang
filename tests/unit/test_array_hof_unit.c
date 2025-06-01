@@ -3,7 +3,7 @@
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"
 #include "parser/parser.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "codegen/compiler.h"
 
 DEFINE_TEST(array_map_lambda) {

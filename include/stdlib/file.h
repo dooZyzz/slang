@@ -1,7 +1,7 @@
 #ifndef STDLIB_FILE_H
 #define STDLIB_FILE_H
 
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 // File I/O functions
 TaggedValue file_open(int arg_count, TaggedValue* args);

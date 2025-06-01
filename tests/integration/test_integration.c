@@ -5,7 +5,7 @@
 #include "utils/test_macros.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "debug/debug.h"
 
 DEFINE_TEST(simple_arithmetic) {

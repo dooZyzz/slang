@@ -2,7 +2,7 @@
 #define COMPILER_H
 
 #include "ast/ast.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 
 typedef struct Loop {
     struct Loop* enclosing;

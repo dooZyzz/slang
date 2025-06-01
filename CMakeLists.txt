@@ -22,77 +22,94 @@ else()
     message(STATUS "GLFW not found, skipping GLFW module")
 endif()
 
-# Source files
+# Source files - using refactored versions where available
 set(LEXER_SOURCES
-    src/lexer/token.c
-    src/lexer/lexer.c
+    src/lexer/token_refactored.c
+    src/lexer/lexer_refactored.c
 )
 
 set(AST_SOURCES
-    src/ast/ast.c
-    # src/ast/ast_printer.c  # TODO: Fix AST printer to match current AST structure
+    src/ast/ast_refactored.c
+    src/ast/ast_printer.c  # Not refactored yet
 )
 
 set(PARSER_SOURCES
-    src/parser/parser.c
+    src/parser/parser_refactored.c
 )
 
 set(VM_SOURCES
-    src/vm/vm.c
-    src/vm/object.c
-    src/vm/object_hash.c
-    src/vm/string_pool.c
+    src/runtime/core/vm_complete_refactored.c
+    src/runtime/core/object_complete_refactored.c
+    src/runtime/core/object_hash_refactored.c
+    src/runtime/core/string_pool_complete_refactored.c
 )
 
 set(CODEGEN_SOURCES
-    src/codegen/compiler.c
+    src/codegen/compiler_refactored.c
 )
 
 set(DEBUG_SOURCES
-    src/debug/debug.c
+    src/debug/debug_refactored.c
 )
 
 set(UTILS_SOURCES
-    src/utils/error.c
-    src/utils/test_framework.c
-    src/utils/syntax_test.c
-    src/utils/cli.c
-    src/utils/logger.c
-    src/utils/compiler_wrapper.c
-    src/utils/bytecode_format.c
-    src/utils/hash_map.c
-    src/utils/version.c
+    src/utils/error_refactored.c
+    src/utils/test_framework.c  # Not refactored yet
+    src/utils/syntax_test.c  # Not refactored yet
+    src/utils/cli.c  # Not refactored yet
+    src/utils/logger.c  # Not refactored yet
+    src/utils/compiler_wrapper.c  # Not refactored yet
+    src/utils/bytecode_format.c  # Not refactored yet
+    src/utils/hash_map_refactored.c
+    src/utils/version.c  # Not refactored yet
+    src/utils/memory.c
+    src/utils/memory_platform.c
+    src/utils/memory_arena.c
+    src/utils/memory_freelist.c
+    src/utils/memory_trace.c
+    src/utils/alloc.c
+    # src/utils/hash_map_v2.c  # Removed - using hash_map_refactored.c instead
+    src/utils/allocators.c
 )
 
 set(SEMANTIC_SOURCES
-    src/semantic/visitor.c
-    src/semantic/type.c
-    src/semantic/symbol_table.c
-    src/semantic/analyzer.c
+    src/semantic/visitor.c  # Not refactored yet
+    src/semantic/type.c  # Not refactored yet
+    src/semantic/symbol_table.c  # Not refactored yet
+    src/semantic/analyzer_refactored.c
 )
 
 set(RUNTIME_SOURCES
-    src/runtime/coroutine.c
-    src/runtime/module.c
-    src/runtime/builtin_modules.c
-    src/runtime/package.c
-    src/runtime/module_format.c
-    src/runtime/module_archive.c
-    src/runtime/module_compiler.c
-    src/runtime/module_cache.c
-    src/runtime/module_hooks.c
-    src/runtime/module_unload.c
-    src/runtime/module_inspect.c
-    src/runtime/module_natives.c
-    src/runtime/module_bundle.c
-    src/runtime/package_manager.c
-    src/runtime/bootstrap.c
+    # Core runtime
+    src/runtime/core/coroutine.c  # Not refactored yet
+    src/runtime/core/bootstrap.c  # Not refactored yet
+    
+    # Module loader
+    src/runtime/modules/loader/module_loader_refactored.c
+    src/runtime/modules/loader/module_cache_refactored.c
+    src/runtime/modules/loader/module_compiler.c  # Not refactored yet
+    
+    # Module formats
+    src/runtime/modules/formats/module_format_refactored.c
+    src/runtime/modules/formats/module_archive_refactored.c
+    src/runtime/modules/formats/module_bundle_refactored.c
+    
+    # Module extensions
+    src/runtime/modules/extensions/module_hooks_refactored.c
+    src/runtime/modules/extensions/module_inspect_refactored.c
+    src/runtime/modules/extensions/module_natives_refactored.c
+    
+    # Module lifecycle
+    src/runtime/modules/lifecycle/module_unload.c  # Not refactored yet
+    src/runtime/modules/lifecycle/builtin_modules_refactored.c
+    
+    # Package management
+    src/runtime/packages/package.c  # Not refactored yet
+    src/runtime/packages/package_manager.c  # Not refactored yet
 )
 
-# Remove this section - we're refactoring the existing system instead
-
 set(STDLIB_SOURCES
-    src/stdlib/stdlib.c
+    src/stdlib/stdlib_refactored.c
 )
 
 # Create static library
@@ -130,93 +147,29 @@ add_dual_test_suite(syntax_unit tests/unit/test_syntax_unit.c)
 add_dual_test_suite(module_system_unit tests/unit/test_module_system_unit.c)
 add_dual_test_suite(multi_module_unit tests/unit/test_multi_module_unit.c)
 
-# Create the main test runner that uses all test libraries
-create_test_runner(
-    OUTPUT_NAME test_runner
-    TEST_SUITES 
-        lexer_unit
-        vm_unit
-        symbol_table_unit
-        error_reporter_unit
-        integration
-        array_methods_unit
-        array_hof_unit
-        string_interp_unit
-        for_loop_unit
-        modulo_unit
-        array_assign_unit
-        ast_unit
-        string_pool_unit
-        object_unit
-        error_advanced_unit
-        syntax_unit
-        module_system_unit
-        multi_module_unit
-)
+# Create main executable
+add_executable(swift_like_lang src/main.c)
+target_link_libraries(swift_like_lang lang_lib)
 
-# Add custom target to run all tests
-add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND} --verbose)
+# Create tools
+# Bundle creation tool
+add_executable(swb-create src/tools/bundle.c)
+target_link_libraries(swb-create lang_lib)
 
-# Main executable (old system)
-add_executable(swiftlang src/main.c)
-
-target_link_libraries(swiftlang lang_lib)
-
-# Bundle tool for module deployment
-add_executable(swiftbundle src/tools/bundle.c)
-target_link_libraries(swiftbundle lang_lib)
-
-# Test module hierarchy
-# add_executable(test_module_hierarchy src/test_module_main.c)
-# target_link_libraries(test_module_hierarchy lang_lib)
-
-
-# GLFW module (if GLFW is found)
-if(GLFW_FOUND)
-    add_library(glfw_module SHARED modules/glfw/src/glfw_native_simple.c)
-    target_link_libraries(glfw_module lang_lib ${GLFW_LIBRARIES})
-    target_include_directories(glfw_module PRIVATE ${GLFW_INCLUDE_DIRS})
-    set_target_properties(glfw_module PROPERTIES PREFIX "" OUTPUT_NAME "glfw_native")
-    
-    # Copy to modules directory for testing
-    add_custom_command(TARGET glfw_module POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:glfw_module> ${CMAKE_BINARY_DIR}/modules/
-    )
+# Set rpath for macOS
+if(APPLE)
+  set_target_properties(swift_like_lang PROPERTIES
+    BUILD_RPATH "@loader_path"
+    INSTALL_RPATH "@loader_path"
+  )
 endif()
 
-# OpenGL module
-find_package(OpenGL)
-if(OpenGL_FOUND)
-    add_library(opengl_module SHARED modules/opengl/src/opengl_native.c)
-    target_link_libraries(opengl_module lang_lib ${OPENGL_LIBRARIES})
-    target_include_directories(opengl_module PRIVATE ${OPENGL_INCLUDE_DIR})
-    set_target_properties(opengl_module PROPERTIES PREFIX "" OUTPUT_NAME "opengl_native")
-    
-    # macOS specific OpenGL settings
-    if(APPLE)
-        target_compile_definitions(opengl_module PRIVATE GL_SILENCE_DEPRECATION)
-    endif()
-    
-    # Copy to modules directory for use in swiftmodule
-    add_custom_command(TARGET opengl_module POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:opengl_module> ${CMAKE_BINARY_DIR}/modules/
+# Add Doxygen documentation target (optional)
+find_package(Doxygen)
+if(DOXYGEN_FOUND)
+    add_custom_target(doc
+        ${DOXYGEN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Generating API documentation with Doxygen" VERBATIM
     )
 endif()
-
-# Math module is already defined above, removed duplicate
-
-# Syntax test runner - commented out as file doesn't exist
-# add_executable(syntax_runner tests/syntax_runner.c)
-# target_link_libraries(syntax_runner lang_lib)
-
-# Time module (native interop)
-add_library(time_module SHARED modules/time/src/time_native.c)
-target_link_libraries(time_module lang_lib)
-set_target_properties(time_module PROPERTIES PREFIX "" OUTPUT_NAME "time")
-
-# Copy time module to build modules directory
-add_custom_command(TARGET time_module POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    $<TARGET_FILE:time_module>
-    ${CMAKE_BINARY_DIR}/modules/time${CMAKE_SHARED_LIBRARY_SUFFIX}
-)

@@ -7,10 +7,10 @@
 #include "parser/parser.h"
 #include "semantic/analyzer.h"
 #include "codegen/compiler.h"
-#include "vm/vm.h"
+#include "runtime/core/vm.h"
 #include "utils/error.h"
 #include "ast/ast.h"
-#include "runtime/builtin_modules.h"
+#include "runtime/modules/lifecycle/builtin_modules.h"
 
 DEFINE_TEST(simple_interpolation) {
     const char* source = 

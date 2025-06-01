@@ -5,9 +5,11 @@
 #include <stddef.h>
 
 typedef struct HashMap HashMap;
+typedef struct Allocator Allocator;
 
 // Create and destroy
 HashMap* hash_map_create(void);
+HashMap* hash_map_create_with_allocator(Allocator* allocator);
 void hash_map_destroy(HashMap* map);
 
 // Operations
