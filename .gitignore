@@ -267,7 +267,6 @@ perf.data
 perf.data.old
 
 # Core dumps
-core
 core.*
 vgcore.*
 
