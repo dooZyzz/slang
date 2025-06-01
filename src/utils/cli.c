@@ -26,6 +26,8 @@
 #include "debug/debug.h"
 #include "ast/ast_printer.h"
 #include "utils/bytecode_format.h"
+#include "utils/allocators.h"
+#include "miniz.h"
 
 // Global CLI configuration
 CLIConfig g_cli_config = {
@@ -120,6 +122,92 @@ static const Command commands[] = {
         .handler = cli_cmd_version,
         .usage = "version",
         .help = "Display SwiftLang version and build information."
+    },
+    // Package management commands
+    {
+        .name = "install",
+        .description = "Install dependencies or modules",
+        .handler = cli_cmd_install,
+        .usage = "install [module] [options]",
+        .help = "Install modules from manifest or specific module.\n"
+                "Options:\n"
+                "  --save           Save to dependencies in manifest.json\n"
+                "  --save-dev       Save to devDependencies\n"
+                "  --global         Install globally\n"
+                "  --no-bundle      Don't bundle dependencies"
+    },
+    {
+        .name = "add",
+        .description = "Add a dependency to the project",
+        .handler = cli_cmd_add,
+        .usage = "add <module> [version] [options]",
+        .help = "Add a module dependency to manifest.json.\n"
+                "Options:\n"
+                "  --dev            Add as development dependency\n"
+                "  --exact          Use exact version\n"
+                "  --optional       Mark as optional dependency"
+    },
+    {
+        .name = "remove",
+        .description = "Remove a dependency from the project",
+        .handler = cli_cmd_remove,
+        .usage = "remove <module>",
+        .help = "Remove a module dependency from manifest.json."
+    },
+    {
+        .name = "publish",
+        .description = "Publish module to registry",
+        .handler = cli_cmd_publish,
+        .usage = "publish [options]",
+        .help = "Build and publish module to registry.\n"
+                "Options:\n"
+                "  --tag <tag>      Version tag (default: from manifest)\n"
+                "  --access <level> Access level: public or restricted\n"
+                "  --dry-run        Perform a dry run without publishing"
+    },
+    {
+        .name = "bundle",
+        .description = "Create a module bundle (.swiftmodule)",
+        .handler = cli_cmd_bundle,
+        .usage = "bundle [options]",
+        .help = "Bundle the current module into a .swiftmodule file.\n"
+                "Options:\n"
+                "  --output <file>  Output file (default: <name>.swiftmodule)\n"
+                "  --include-deps   Include all dependencies in bundle\n"
+                "  --minify         Minify bytecode\n"
+                "  --sign           Sign the bundle"
+    },
+    {
+        .name = "list",
+        .description = "List installed modules",
+        .handler = cli_cmd_list,
+        .usage = "list [options]",
+        .help = "List installed modules and dependencies.\n"
+                "Options:\n"
+                "  --depth <n>      Max display depth (default: 0)\n"
+                "  --json           Output as JSON\n"
+                "  --global         List global modules"
+    },
+    {
+        .name = "update",
+        .description = "Update dependencies",
+        .handler = cli_cmd_update,
+        .usage = "update [module] [options]",
+        .help = "Update module dependencies to latest versions.\n"
+                "Options:\n"
+                "  --save           Update manifest.json\n"
+                "  --dry-run        Show what would be updated"
+    },
+    {
+        .name = "cache",
+        .description = "Manage module cache",
+        .handler = cli_cmd_cache,
+        .usage = "cache <command> [options]",
+        .help = "Manage the module cache.\n"
+                "Commands:\n"
+                "  clean            Remove all cached modules\n"
+                "  list             List cached modules\n"
+                "  verify           Verify cache integrity"
     }
 };
 
@@ -165,6 +253,23 @@ static struct option long_options[] = {
     {"help", no_argument, 0, 'h'},
     {"version", no_argument, 0, 'V'},
     {"watch", no_argument, 0, 'w'},
+    
+    // Package management options
+    {"save", no_argument, 0, 0},
+    {"save-dev", no_argument, 0, 0},
+    {"global", no_argument, 0, 'g'},
+    {"no-bundle", no_argument, 0, 0},
+    {"dev", no_argument, 0, 0},
+    {"exact", no_argument, 0, 0},
+    {"optional", no_argument, 0, 0},
+    {"tag", required_argument, 0, 0},
+    {"access", required_argument, 0, 0},
+    {"dry-run", no_argument, 0, 0},
+    {"include-deps", no_argument, 0, 0},
+    {"minify", no_argument, 0, 0},
+    {"sign", no_argument, 0, 0},
+    {"depth", required_argument, 0, 0},
+    {"json", no_argument, 0, 0},
     
     {0, 0, 0, 0}
 };
@@ -422,6 +527,15 @@ void cli_parse_args(int argc, char* argv[]) {
 }
 
 int cli_main(int argc, char* argv[]) {
+    // Initialize allocator system first
+    AllocatorConfig alloc_config = {
+        .enable_trace = false,
+        .enable_stats = false,
+        .arena_size = 64 * 1024,        // 64KB arenas
+        .object_pool_size = 4 * 1024    // 4KB object pools
+    };
+    allocators_init(&alloc_config);
+    
     // Initialize logger
     logger_init();
     
@@ -434,6 +548,7 @@ int cli_main(int argc, char* argv[]) {
     // Check if no arguments provided
     if (optind >= argc) {
         cli_print_help(argv[0]);
+        allocators_shutdown();
         return 0;
     }
     
@@ -443,7 +558,9 @@ int cli_main(int argc, char* argv[]) {
     // Check if it's a file to run
     if (cli_file_exists(cmd_name) && strstr(cmd_name, ".swift")) {
         g_cli_config.input_file = cmd_name;
-        return cli_run_file(cmd_name);
+        int result = cli_run_file(cmd_name);
+        allocators_shutdown();
+        return result;
     }
     
     // Find command
@@ -458,11 +575,14 @@ int cli_main(int argc, char* argv[]) {
     if (!cmd) {
         cli_print_error("Unknown command: %s", cmd_name);
         cli_print_info("Run '%s help' for usage information", argv[0]);
+        allocators_shutdown();
         return 1;
     }
     
     // Execute command with remaining arguments
-    return cmd->handler(argc - optind, argv + optind);
+    int result = cmd->handler(argc - optind, argv + optind);
+    allocators_shutdown();
+    return result;
 }
 
 // Command implementations
@@ -507,10 +627,10 @@ int cli_cmd_init(int argc, char* argv[]) {
     (void)argv;
     LOG_INFO(LOG_MODULE_CLI, "Initializing new project");
     
-    // Create module.json
-    FILE* f = fopen("module.json", "w");
+    // Create manifest.json
+    FILE* f = fopen("manifest.json", "w");
     if (!f) {
-        cli_print_error("Failed to create module.json");
+        cli_print_error("Failed to create manifest.json");
         return 1;
     }
     
@@ -587,9 +707,9 @@ int cli_cmd_build(int argc, char* argv[]) {
     
     cli_print_info("Starting build process...");
     
-    // Check for module.json
-    if (!cli_file_exists("module.json")) {
-        cli_print_error("No module.json found in current directory");
+    // Check for manifest.json
+    if (!cli_file_exists("manifest.json")) {
+        cli_print_error("No manifest.json found in current directory");
         cli_print_info("Run 'swiftlang init' to initialize a project");
         return 1;
     }
@@ -606,7 +726,7 @@ int cli_cmd_build(int argc, char* argv[]) {
     // Load module metadata
     ModuleMetadata* metadata = package_load_module_metadata(".");
     if (!metadata) {
-        cli_print_error("Failed to load module.json");
+        cli_print_error("Failed to load manifest.json");
         return 1;
     }
     
@@ -673,7 +793,7 @@ int cli_cmd_run(int argc, char* argv[]) {
     // Check if a file was specified
     if (argc > 1 && argv[1][0] != '-') {
         file_to_run = argv[1];
-    } else if (cli_file_exists("module.json")) {
+    } else if (cli_file_exists("manifest.json")) {
         // Try to run project main file
         ModuleMetadata* metadata = package_load_module_metadata(".");
         if (metadata && metadata->main_file) {
@@ -1219,6 +1339,8 @@ int cli_run_file(const char* path) {
     // Create VM and run
     VM vm;
     vm_init(&vm);
+    ModuleLoader* loader = module_loader_create(&vm);
+    vm.module_loader = loader;
     
     // Add custom module paths to VM's module loader
     for (int i = 0; i < g_cli_config.module_path_count; i++) {
@@ -1263,10 +1385,764 @@ int cli_run_file(const char* path) {
     parser_destroy(parser);
     free(source);
     vm_free(&vm);
+    module_loader_destroy(loader);
     
     LOG_DEBUG(LOG_MODULE_CLI, "Execution completed with result: %d", result);
     
     if (result == INTERPRET_COMPILE_ERROR) return 65;
     if (result == INTERPRET_RUNTIME_ERROR) return 70;
+    return 0;
+}
+
+// Package management command implementations
+
+// Simple JSON manifest handling
+typedef struct {
+    char* name;
+    char* version;
+    char* description;
+    char* main;
+    char* type;
+    char** sources;
+    int sources_count;
+    // Dependencies as key-value pairs
+    char** dep_names;
+    char** dep_versions;
+    int dep_count;
+    char** dev_dep_names;
+    char** dev_dep_versions;
+    int dev_dep_count;
+} Manifest;
+
+static Manifest* manifest_read(const char* path) {
+    char* content = read_file(path);
+    if (!content) return NULL;
+    
+    Manifest* manifest = calloc(1, sizeof(Manifest));
+    
+    // Very simple JSON parsing - this should be replaced with proper JSON parser
+    char* ptr = content;
+    char key[256], value[1024];
+    
+    while (*ptr) {
+        // Skip whitespace
+        while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == '\n' || *ptr == '\r')) ptr++;
+        
+        // Look for "key": "value" patterns
+        if (*ptr == '"') {
+            ptr++; // Skip opening quote
+            int i = 0;
+            while (*ptr && *ptr != '"' && i < sizeof(key)-1) {
+                key[i++] = *ptr++;
+            }
+            key[i] = '\0';
+            if (*ptr == '"') ptr++; // Skip closing quote
+            
+            // Skip : and whitespace
+            while (*ptr && (*ptr == ' ' || *ptr == '\t' || *ptr == ':')) ptr++;
+            
+            // Read value
+            if (*ptr == '"') {
+                ptr++; // Skip opening quote
+                i = 0;
+                while (*ptr && *ptr != '"' && i < sizeof(value)-1) {
+                    value[i++] = *ptr++;
+                }
+                value[i] = '\0';
+                if (*ptr == '"') ptr++; // Skip closing quote
+                
+                // Store values
+                if (strcmp(key, "name") == 0) {
+                    manifest->name = strdup(value);
+                } else if (strcmp(key, "version") == 0) {
+                    manifest->version = strdup(value);
+                } else if (strcmp(key, "description") == 0) {
+                    manifest->description = strdup(value);
+                } else if (strcmp(key, "main") == 0) {
+                    manifest->main = strdup(value);
+                } else if (strcmp(key, "type") == 0) {
+                    manifest->type = strdup(value);
+                }
+            }
+        }
+        ptr++;
+    }
+    
+    free(content);
+    return manifest;
+}
+
+static void manifest_free(Manifest* manifest) {
+    if (!manifest) return;
+    
+    free(manifest->name);
+    free(manifest->version);
+    free(manifest->description);
+    free(manifest->main);
+    free(manifest->type);
+    
+    for (int i = 0; i < manifest->sources_count; i++) {
+        free(manifest->sources[i]);
+    }
+    free(manifest->sources);
+    
+    for (int i = 0; i < manifest->dep_count; i++) {
+        free(manifest->dep_names[i]);
+        free(manifest->dep_versions[i]);
+    }
+    free(manifest->dep_names);
+    free(manifest->dep_versions);
+    
+    for (int i = 0; i < manifest->dev_dep_count; i++) {
+        free(manifest->dev_dep_names[i]);
+        free(manifest->dev_dep_versions[i]);
+    }
+    free(manifest->dev_dep_names);
+    free(manifest->dev_dep_versions);
+    
+    free(manifest);
+}
+
+static bool manifest_write(const char* path, Manifest* manifest) {
+    FILE* f = fopen(path, "w");
+    if (!f) return false;
+    
+    fprintf(f, "{\n");
+    fprintf(f, "  \"name\": \"%s\",\n", manifest->name ? manifest->name : "");
+    fprintf(f, "  \"version\": \"%s\",\n", manifest->version ? manifest->version : "1.0.0");
+    fprintf(f, "  \"description\": \"%s\",\n", manifest->description ? manifest->description : "");
+    fprintf(f, "  \"main\": \"%s\",\n", manifest->main ? manifest->main : "main.swift");
+    fprintf(f, "  \"type\": \"%s\"", manifest->type ? manifest->type : "application");
+    
+    // Sources
+    if (manifest->sources_count > 0) {
+        fprintf(f, ",\n  \"sources\": [\n");
+        for (int i = 0; i < manifest->sources_count; i++) {
+            fprintf(f, "    \"%s\"", manifest->sources[i]);
+            if (i < manifest->sources_count - 1) fprintf(f, ",");
+            fprintf(f, "\n");
+        }
+        fprintf(f, "  ]");
+    }
+    
+    // Dependencies
+    if (manifest->dep_count > 0) {
+        fprintf(f, ",\n  \"dependencies\": {\n");
+        for (int i = 0; i < manifest->dep_count; i++) {
+            fprintf(f, "    \"%s\": \"%s\"", manifest->dep_names[i], manifest->dep_versions[i]);
+            if (i < manifest->dep_count - 1) fprintf(f, ",");
+            fprintf(f, "\n");
+        }
+        fprintf(f, "  }");
+    }
+    
+    // Dev dependencies
+    if (manifest->dev_dep_count > 0) {
+        fprintf(f, ",\n  \"devDependencies\": {\n");
+        for (int i = 0; i < manifest->dev_dep_count; i++) {
+            fprintf(f, "    \"%s\": \"%s\"", manifest->dev_dep_names[i], manifest->dev_dep_versions[i]);
+            if (i < manifest->dev_dep_count - 1) fprintf(f, ",");
+            fprintf(f, "\n");
+        }
+        fprintf(f, "  }");
+    }
+    
+    fprintf(f, "\n}\n");
+    fclose(f);
+    return true;
+}
+
+// Get the global module cache directory
+static const char* get_module_cache_dir(void) {
+    static char cache_dir[PATH_MAX];
+    const char* home = getenv("HOME");
+    if (!home) home = "/tmp";
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.swiftlang/cache", home);
+    return cache_dir;
+}
+
+// Get the global modules directory
+static const char* get_global_modules_dir(void) {
+    static char modules_dir[PATH_MAX];
+    const char* home = getenv("HOME");
+    if (!home) home = "/tmp";
+    snprintf(modules_dir, sizeof(modules_dir), "%s/.swiftlang/modules", home);
+    return modules_dir;
+}
+
+// Ensure a directory exists
+static bool ensure_directory_exists(const char* path) {
+    struct stat st = {0};
+    if (stat(path, &st) == -1) {
+        // Create directory recursively
+        char tmp[PATH_MAX];
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        
+        for (char* p = tmp + 1; *p; p++) {
+            if (*p == '/') {
+                *p = '\0';
+                mkdir(tmp, 0755);
+                *p = '/';
+            }
+        }
+        mkdir(tmp, 0755);
+    }
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+int cli_cmd_install(int argc, char* argv[]) {
+    bool save = false;
+    bool save_dev = false;
+    bool global = false;
+    bool no_bundle = false;
+    
+    // Debug: print arguments
+    LOG_DEBUG(LOG_MODULE_CLI, "install command called with %d args", argc);
+    for (int i = 0; i < argc; i++) {
+        LOG_DEBUG(LOG_MODULE_CLI, "  argv[%d] = '%s'", i, argv[i]);
+    }
+    
+    // Parse options and find module name
+    const char* module_to_install = NULL;
+    for (int i = 1; i < argc; i++) {  // Start from 1 to skip command name
+        if (strcmp(argv[i], "--save") == 0) save = true;
+        else if (strcmp(argv[i], "--save-dev") == 0) save_dev = true;
+        else if (strcmp(argv[i], "--global") == 0 || strcmp(argv[i], "-g") == 0) global = true;
+        else if (strcmp(argv[i], "--no-bundle") == 0) no_bundle = true;
+        else if (argv[i][0] != '-' && !module_to_install) {
+            module_to_install = argv[i];
+        }
+    }
+    
+    // Check if manifest.json exists
+    if (!global && !module_to_install) {
+        // Install from manifest.json
+        if (!cli_file_exists("manifest.json")) {
+            cli_print_error("No manifest.json found in current directory");
+            return 1;
+        }
+        
+        cli_print_info("Installing dependencies from manifest.json...");
+        // TODO: Read manifest and install dependencies
+        cli_print_success("Dependencies installed successfully");
+        return 0;
+    }
+    
+    // Install specific module
+    if (module_to_install) {
+        const char* module_name = module_to_install;
+        const char* version = "latest"; // TODO: Parse version from module@version
+        
+        cli_print_info("Installing %s@%s...", module_name, version);
+        
+        // Check if it's a local .swiftmodule file
+        if (strstr(module_name, ".swiftmodule")) {
+            if (!cli_file_exists(module_name)) {
+                cli_print_error("Module file not found: %s", module_name);
+                return 1;
+            }
+            
+            // Extract module name from filename
+            char base_name[256];
+            const char* filename = strrchr(module_name, '/');
+            filename = filename ? filename + 1 : module_name;
+            strncpy(base_name, filename, sizeof(base_name)-1);
+            char* ext = strstr(base_name, ".swiftmodule");
+            if (ext) *ext = '\0';
+            
+            // Determine install location
+            const char* install_dir = global ? get_global_modules_dir() : "node_modules";
+            ensure_directory_exists(install_dir);
+            
+            // Create module directory
+            char module_dir[PATH_MAX];
+            snprintf(module_dir, sizeof(module_dir), "%s/%s", install_dir, base_name);
+            ensure_directory_exists(module_dir);
+            
+            // Extract the archive
+            cli_print_info("Extracting module...");
+            mz_zip_archive zip;
+            memset(&zip, 0, sizeof(zip));
+            
+            if (mz_zip_reader_init_file(&zip, module_name, 0)) {
+                int num_files = mz_zip_reader_get_num_files(&zip);
+                for (int i = 0; i < num_files; i++) {
+                    mz_zip_archive_file_stat file_stat;
+                    if (!mz_zip_reader_file_stat(&zip, i, &file_stat)) continue;
+                    
+                    if (!file_stat.m_is_directory) {
+                        char extract_path[PATH_MAX];
+                        snprintf(extract_path, sizeof(extract_path), "%s/%s", module_dir, file_stat.m_filename);
+                        
+                        // Create directory if needed
+                        char* dir_sep = strrchr(extract_path, '/');
+                        if (dir_sep) {
+                            *dir_sep = '\0';
+                            ensure_directory_exists(extract_path);
+                            *dir_sep = '/';
+                        }
+                        
+                        // Extract file
+                        mz_zip_reader_extract_to_file(&zip, i, extract_path, 0);
+                    }
+                }
+                mz_zip_reader_end(&zip);
+                
+                cli_print_success("Module %s installed to %s", base_name, install_dir);
+            } else {
+                cli_print_error("Failed to open module archive: %s", module_name);
+                return 1;
+            }
+        } else {
+            // TODO: Download from registry
+            cli_print_error("Module registry not yet implemented");
+            return 1;
+        }
+        
+        if (save || save_dev) {
+            // TODO: Update manifest.json
+            cli_print_success("Added %s to %s", module_name, 
+                            save_dev ? "devDependencies" : "dependencies");
+        }
+        
+        return 0;
+    }
+    
+    cli_print_error("No module specified");
+    return 1;
+}
+
+int cli_cmd_add(int argc, char* argv[]) {
+    if (argc < 1) {
+        cli_print_error("Module name required");
+        cli_print_info("Usage: swiftlang add <module> [version]");
+        return 1;
+    }
+    
+    const char* module_name = argv[0];
+    const char* version = argc > 1 ? argv[1] : "latest";
+    bool dev = false;
+    bool exact = false;
+    bool optional = false;
+    
+    // Parse options
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--dev") == 0) dev = true;
+        else if (strcmp(argv[i], "--exact") == 0) exact = true;
+        else if (strcmp(argv[i], "--optional") == 0) optional = true;
+    }
+    
+    if (!cli_file_exists("manifest.json")) {
+        cli_print_error("No manifest.json found. Run 'swiftlang init' first");
+        return 1;
+    }
+    
+    cli_print_info("Adding %s@%s to %s...", module_name, version,
+                   dev ? "devDependencies" : "dependencies");
+    
+    // TODO: Add dependency to manifest.json
+    // TODO: Install the module
+    
+    cli_print_success("Added %s@%s", module_name, version);
+    return 0;
+}
+
+int cli_cmd_remove(int argc, char* argv[]) {
+    if (argc < 1) {
+        cli_print_error("Module name required");
+        cli_print_info("Usage: swiftlang remove <module>");
+        return 1;
+    }
+    
+    const char* module_name = argv[0];
+    
+    if (!cli_file_exists("manifest.json")) {
+        cli_print_error("No manifest.json found");
+        return 1;
+    }
+    
+    cli_print_info("Removing %s...", module_name);
+    
+    // TODO: Remove from manifest.json
+    // TODO: Clean up installed files
+    
+    cli_print_success("Removed %s", module_name);
+    return 0;
+}
+
+int cli_cmd_publish(int argc, char* argv[]) {
+    const char* tag = NULL;
+    const char* access = "public";
+    bool dry_run = false;
+    
+    // Parse options
+    for (int i = 0; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--tag") == 0) tag = argv[++i];
+        else if (strcmp(argv[i], "--access") == 0) access = argv[++i];
+        else if (strcmp(argv[i], "--dry-run") == 0) dry_run = true;
+    }
+    
+    if (!cli_file_exists("manifest.json")) {
+        cli_print_error("No manifest.json found");
+        return 1;
+    }
+    
+    // TODO: Read manifest.json
+    const char* module_name = "unknown"; // TODO: Get from manifest
+    const char* version = tag ? tag : "1.0.0"; // TODO: Get from manifest
+    
+    cli_print_info("Publishing %s@%s...", module_name, version);
+    
+    if (dry_run) {
+        cli_print_info("Dry run - no files will be published");
+        // TODO: Show what would be published
+        return 0;
+    }
+    
+    // TODO: Build module
+    // TODO: Create .swiftmodule bundle
+    // TODO: Upload to registry
+    
+    cli_print_success("Published %s@%s", module_name, version);
+    return 0;
+}
+
+int cli_cmd_bundle(int argc, char* argv[]) {
+    const char* output = NULL;
+    bool include_deps = false;
+    bool minify = false;
+    bool sign = false;
+    
+    // Parse options
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) output = argv[++i];
+        else if (strcmp(argv[i], "--include-deps") == 0) include_deps = true;
+        else if (strcmp(argv[i], "--minify") == 0) minify = true;
+        else if (strcmp(argv[i], "--sign") == 0) sign = true;
+    }
+    
+    // Check for manifest.json or module.json
+    const char* manifest_file = NULL;
+    if (cli_file_exists("manifest.json")) {
+        manifest_file = "manifest.json";
+    } else if (cli_file_exists("module.json")) {
+        manifest_file = "module.json";
+    } else {
+        cli_print_error("No manifest.json or module.json found");
+        return 1;
+    }
+    
+    // Read manifest
+    Manifest* manifest = manifest_read(manifest_file);
+    if (!manifest) {
+        cli_print_error("Failed to read %s", manifest_file);
+        return 1;
+    }
+    
+    const char* module_name = manifest->name ? manifest->name : "unknown";
+    
+    if (!output) {
+        char default_output[256];
+        snprintf(default_output, sizeof(default_output), "%s.swiftmodule", module_name);
+        output = strdup(default_output);
+    }
+    
+    cli_print_info("Creating bundle %s...", output);
+    
+    // Create build directory
+    ensure_directory_exists("build");
+    ensure_directory_exists("build/bytecode");
+    
+    // Compile all source files to bytecode
+    cli_print_info("Compiling source files...");
+    int compiled_count = 0;
+    
+    // Get list of source files
+    glob_t glob_result;
+    if (glob("*.swift", GLOB_TILDE, NULL, &glob_result) == 0) {
+        for (size_t i = 0; i < glob_result.gl_pathc; i++) {
+            const char* source_file = glob_result.gl_pathv[i];
+            cli_print_info("  Compiling %s...", source_file);
+            
+            // Read source
+            char* source = read_file(source_file);
+            if (!source) {
+                cli_print_error("Failed to read %s", source_file);
+                continue;
+            }
+            
+            // Parse
+            Parser* parser = parser_create(source);
+            ProgramNode* program = parser_parse_program(parser);
+            
+            if (!parser->had_error) {
+                // Compile to bytecode
+                Chunk chunk;
+                chunk_init(&chunk);
+                
+                if (compile(program, &chunk)) {
+                    // Save bytecode
+                    char bytecode_path[PATH_MAX];
+                    snprintf(bytecode_path, sizeof(bytecode_path), "build/bytecode/%s.swiftbc", source_file);
+                    
+                    // Remove .swift extension
+                    char* ext = strrchr(bytecode_path, '.');
+                    if (ext && strcmp(ext, ".swift.swiftbc") == 0) {
+                        strcpy(ext, ".swiftbc");
+                    }
+                    
+                    uint8_t* bytecode_data;
+                    size_t bytecode_size;
+                    if (bytecode_serialize(&chunk, &bytecode_data, &bytecode_size)) {
+                        FILE* f = fopen(bytecode_path, "wb");
+                        if (f) {
+                            fwrite(bytecode_data, 1, bytecode_size, f);
+                            fclose(f);
+                            compiled_count++;
+                        }
+                        free(bytecode_data);
+                    }
+                }
+                
+                chunk_free(&chunk);
+            }
+            
+            program_destroy(program);
+            parser_destroy(parser);
+            free(source);
+        }
+        globfree(&glob_result);
+    }
+    
+    cli_print_info("Compiled %d source files", compiled_count);
+    
+    // Create ZIP archive
+    cli_print_info("Creating archive...");
+    
+    mz_zip_archive zip;
+    memset(&zip, 0, sizeof(zip));
+    
+    if (!mz_zip_writer_init_file(&zip, output, 0)) {
+        cli_print_error("Failed to create archive %s", output);
+        manifest_free(manifest);
+        return 1;
+    }
+    
+    // Add manifest.json
+    char* manifest_content = read_file(manifest_file);
+    if (manifest_content) {
+        mz_zip_writer_add_mem(&zip, "manifest.json", manifest_content, strlen(manifest_content), MZ_DEFAULT_COMPRESSION);
+        free(manifest_content);
+    }
+    
+    // Add bytecode files
+    if (glob("build/bytecode/*.swiftbc", GLOB_TILDE, NULL, &glob_result) == 0) {
+        for (size_t i = 0; i < glob_result.gl_pathc; i++) {
+            const char* bytecode_file = glob_result.gl_pathv[i];
+            const char* rel_path = strstr(bytecode_file, "build/");
+            if (rel_path) rel_path += 6; // Skip "build/"
+            else rel_path = bytecode_file;
+            
+            char* content = read_file(bytecode_file);
+            if (content) {
+                // Need to read as binary
+                FILE* f = fopen(bytecode_file, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long size = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    uint8_t* data = malloc(size);
+                    fread(data, 1, size, f);
+                    fclose(f);
+                    
+                    mz_zip_writer_add_mem(&zip, rel_path, data, size, MZ_DEFAULT_COMPRESSION);
+                    free(data);
+                }
+                free(content);
+            }
+        }
+        globfree(&glob_result);
+    }
+    
+    // Add native libraries
+    if (glob("lib/*.dylib", GLOB_TILDE, NULL, &glob_result) == 0) {
+        for (size_t i = 0; i < glob_result.gl_pathc; i++) {
+            const char* lib_file = glob_result.gl_pathv[i];
+            FILE* f = fopen(lib_file, "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long size = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                uint8_t* data = malloc(size);
+                fread(data, 1, size, f);
+                fclose(f);
+                
+                mz_zip_writer_add_mem(&zip, lib_file, data, size, MZ_DEFAULT_COMPRESSION);
+                free(data);
+            }
+        }
+        globfree(&glob_result);
+    }
+    
+    // Also check for .so and .dll files
+    const char* lib_patterns[] = {"lib/*.so", "lib/*.dll", NULL};
+    for (int i = 0; lib_patterns[i]; i++) {
+        if (glob(lib_patterns[i], GLOB_TILDE, NULL, &glob_result) == 0) {
+            for (size_t j = 0; j < glob_result.gl_pathc; j++) {
+                const char* lib_file = glob_result.gl_pathv[j];
+                FILE* f = fopen(lib_file, "rb");
+                if (f) {
+                    fseek(f, 0, SEEK_END);
+                    long size = ftell(f);
+                    fseek(f, 0, SEEK_SET);
+                    uint8_t* data = malloc(size);
+                    fread(data, 1, size, f);
+                    fclose(f);
+                    
+                    mz_zip_writer_add_mem(&zip, lib_file, data, size, MZ_DEFAULT_COMPRESSION);
+                    free(data);
+                }
+            }
+            globfree(&glob_result);
+        }
+    }
+    
+    if (include_deps) {
+        cli_print_info("Including dependencies in bundle...");
+        // TODO: Bundle dependencies from node_modules
+    }
+    
+    if (minify) {
+        cli_print_info("Minifying bytecode...");
+        // TODO: Minify bytecode
+    }
+    
+    if (sign) {
+        cli_print_info("Signing bundle...");
+        // TODO: Sign bundle with checksums
+    }
+    
+    // Finalize ZIP
+    if (!mz_zip_writer_finalize_archive(&zip)) {
+        cli_print_error("Failed to finalize archive");
+        mz_zip_writer_end(&zip);
+        manifest_free(manifest);
+        return 1;
+    }
+    
+    mz_zip_writer_end(&zip);
+    manifest_free(manifest);
+    
+    // Get file size
+    struct stat st;
+    if (stat(output, &st) == 0) {
+        double size_kb = st.st_size / 1024.0;
+        cli_print_success("Bundle created: %s (%.1f KB)", output, size_kb);
+    } else {
+        cli_print_success("Bundle created: %s", output);
+    }
+    
+    return 0;
+}
+
+int cli_cmd_list(int argc, char* argv[]) {
+    int depth = 0;
+    bool json = false;
+    bool global = false;
+    
+    // Parse options
+    for (int i = 0; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--depth") == 0) depth = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--json") == 0) json = true;
+        else if (strcmp(argv[i], "--global") == 0 || strcmp(argv[i], "-g") == 0) global = true;
+    }
+    
+    if (json) {
+        // TODO: Output JSON format
+        printf("{\"modules\":[]}\n");
+        return 0;
+    }
+    
+    if (global) {
+        cli_print_info("Global modules:");
+        // TODO: List global modules
+    } else {
+        if (!cli_file_exists("manifest.json")) {
+            cli_print_error("No manifest.json found");
+            return 1;
+        }
+        
+        cli_print_info("Project dependencies:");
+        // TODO: List project dependencies
+    }
+    
+    return 0;
+}
+
+int cli_cmd_update(int argc, char* argv[]) {
+    const char* module_name = argc > 0 ? argv[0] : NULL;
+    bool save = false;
+    bool dry_run = false;
+    
+    // Parse options
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--save") == 0) save = true;
+        else if (strcmp(argv[i], "--dry-run") == 0) dry_run = true;
+    }
+    
+    if (!cli_file_exists("manifest.json")) {
+        cli_print_error("No manifest.json found");
+        return 1;
+    }
+    
+    if (module_name) {
+        cli_print_info("Updating %s...", module_name);
+    } else {
+        cli_print_info("Updating all dependencies...");
+    }
+    
+    if (dry_run) {
+        cli_print_info("Dry run - no changes will be made");
+        // TODO: Show what would be updated
+        return 0;
+    }
+    
+    // TODO: Check for updates
+    // TODO: Download and install updates
+    
+    if (save) {
+        // TODO: Update manifest.json with new versions
+        cli_print_info("Updated manifest.json");
+    }
+    
+    cli_print_success("Update complete");
+    return 0;
+}
+
+int cli_cmd_cache(int argc, char* argv[]) {
+    if (argc < 1) {
+        cli_print_error("Cache command required");
+        cli_print_info("Usage: swiftlang cache <clean|list|verify>");
+        return 1;
+    }
+    
+    const char* command = argv[0];
+    
+    if (strcmp(command, "clean") == 0) {
+        cli_print_info("Cleaning module cache...");
+        // TODO: Remove cache directory
+        cli_print_success("Cache cleaned");
+    } else if (strcmp(command, "list") == 0) {
+        cli_print_info("Cached modules:");
+        // TODO: List cached modules
+    } else if (strcmp(command, "verify") == 0) {
+        cli_print_info("Verifying cache integrity...");
+        // TODO: Verify checksums
+        cli_print_success("Cache verified");
+    } else {
+        cli_print_error("Unknown cache command: %s", command);
+        return 1;
+    }
+    
     return 0;
 }

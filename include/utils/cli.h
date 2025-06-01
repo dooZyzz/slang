@@ -76,6 +76,16 @@ int cli_cmd_help(int argc, char* argv[]);
 int cli_cmd_version(int argc, char* argv[]);
 int cli_cmd_repl(int argc, char* argv[]);
 
+// Package management commands
+int cli_cmd_install(int argc, char* argv[]);
+int cli_cmd_add(int argc, char* argv[]);
+int cli_cmd_remove(int argc, char* argv[]);
+int cli_cmd_publish(int argc, char* argv[]);
+int cli_cmd_bundle(int argc, char* argv[]);
+int cli_cmd_list(int argc, char* argv[]);
+int cli_cmd_update(int argc, char* argv[]);
+int cli_cmd_cache(int argc, char* argv[]);
+
 // Main CLI entry point
 int cli_main(int argc, char* argv[]);
 

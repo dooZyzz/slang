@@ -54,9 +54,6 @@ void module_hooks_init(void) {
 void module_hooks_cleanup(void) {
     pthread_mutex_lock(&g_hook_system.lock);
     
-    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
-    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
-    
     // Free module-specific hooks
     if (g_hook_system.module_hooks) {
         // Note: hash_map_destroy will free the entries
@@ -116,9 +113,6 @@ void module_remove_hooks(const char* module_name) {
     if (!module_name) return;
     
     pthread_mutex_lock(&g_hook_system.lock);
-    
-    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
-    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module_name);
     if (entry) {

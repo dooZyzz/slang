@@ -87,8 +87,9 @@ The refactoring to use custom memory allocators throughout the SwiftLang project
 The project currently builds with:
 - Some warnings (mostly about unused parameters and functions)
 - All major components compile successfully
-- Some test executables link successfully
+- Main executable (swift_like_lang) builds and runs
 - Module system is fully refactored and functional
+- Some unit tests are failing due to incomplete feature implementation in refactored code
 
 ## Next Steps
 1. Complete the AST refactoring by adding missing functions

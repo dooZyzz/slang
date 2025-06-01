@@ -1,9 +1,0 @@
-{
-  "modules": [
-    {
-      "name": "modules-example",
-      "version": "1.0.0",
-      "path": "modules/modules-example.swiftmodule"
-    }
-  ]
-}
