@@ -1,3 +1,12 @@
+/* 
+ * debug_refactored.c - Refactored version of debug.c for custom allocator API
+ * 
+ * NOTE: No memory allocations were found in the original debug.c file.
+ * This module only performs bytecode disassembly and debug flag management,
+ * operating entirely on stack memory and pre-allocated structures.
+ * Therefore, no changes were needed for the custom allocator refactoring.
+ */
+
 #include "debug/debug.h"
 #include <stdio.h>
 #include <stdlib.h>

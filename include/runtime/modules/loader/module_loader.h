@@ -8,7 +8,8 @@
 #include "ast/ast.h"
 #include "runtime/packages/package.h"
 
-typedef enum {
+typedef enum
+{
     MODULE_STATE_UNLOADED,
     MODULE_STATE_LOADING,
     MODULE_STATE_LOADED,
@@ -16,103 +17,112 @@ typedef enum {
 } ModuleState;
 
 // Module scope entry with visibility flag
-typedef struct ModuleScopeEntry {
+typedef struct ModuleScopeEntry
+{
     const char* name;
     TaggedValue value;
-    bool is_exported;  // true if exported, false if module-private
+    bool is_exported; // true if exported, false if module-private
 } ModuleScopeEntry;
 
 // Module scope hashtable for fast lookup
-typedef struct ModuleScope {
+typedef struct ModuleScope
+{
     ModuleScopeEntry* entries;
     size_t count;
     size_t capacity;
 } ModuleScope;
 
-typedef struct Module {
+typedef struct Module
+{
     const char* path;
     const char* absolute_path;
-    const char* version;  // Module version (e.g., "1.0.0")
+    const char* version; // Module version (e.g., "1.0.0")
     ModuleState state;
-    
+
     // Reference counting for safe unloading
     int ref_count;
     pthread_mutex_t ref_mutex;
-    
+
     // LRU tracking
     time_t last_access_time;
-    
+
     // Module scope (all definitions with export flags)
     ModuleScope* scope;
-    
+
     // Module exports (public interface)
-    struct {
+    struct
+    {
         char** names;
         TaggedValue* values;
-        uint8_t* visibility;  // 0 = private, 1 = public
+        uint8_t* visibility; // 0 = private, 1 = public
         size_t count;
         size_t capacity;
     } exports;
-    
+
     // Module object for storing exports
     Object* module_object;
-    
+
     // Module globals (preserved after module execution)
-    struct {
+    struct
+    {
         char** names;
         TaggedValue* values;
         size_t count;
         size_t capacity;
     } globals;
-    
+
     // For native modules
     bool is_native;
-    void* native_handle;  // dlopen handle
+    void* native_handle; // dlopen handle
     char* temp_native_path; // Temporary extracted native library path
-    
+
     // Module initialization function for native modules
     bool (*init_fn)(struct Module* module);
-    
+
     // For lazy loading
-    Chunk* chunk;  // Stored bytecode for lazy execution
+    Chunk* chunk; // Stored bytecode for lazy execution
 } Module;
 
 // Module loader types for hierarchy
-typedef enum {
-    MODULE_LOADER_BOOTSTRAP,    // Root loader for built-ins
-    MODULE_LOADER_SYSTEM,       // System/stdlib modules  
-    MODULE_LOADER_APPLICATION,  // User application modules
-    MODULE_LOADER_CHILD        // Dynamic child loaders
+typedef enum
+{
+    MODULE_LOADER_BOOTSTRAP, // Root loader for built-ins
+    MODULE_LOADER_SYSTEM, // System/stdlib modules
+    MODULE_LOADER_APPLICATION, // User application modules
+    MODULE_LOADER_CHILD // Dynamic child loaders
 } ModuleLoaderType;
 
 // Forward declaration for module cache
 typedef struct ModuleCache ModuleCache;
 
-typedef struct ModuleLoader {
+typedef struct ModuleLoader
+{
     // Loader hierarchy
     ModuleLoaderType type;
     const char* name;
-    struct ModuleLoader* parent;  // Parent loader for delegation
-    
+    struct ModuleLoader* parent; // Parent loader for delegation
+
     // Module cache (thread-safe implementation)
     ModuleCache* cache;
-    
+
     // Module search paths
-    struct {
+    struct
+    {
         char** paths;
         size_t count;
         size_t capacity;
     } search_paths;
-    
+
     VM* vm;
-    
+
     // Package system integration
     PackageSystem* package_system;
 } ModuleLoader;
 
 // Module loader functions
 ModuleLoader* module_loader_create(VM* vm);
-ModuleLoader* module_loader_create_with_hierarchy(ModuleLoaderType type, const char* name, ModuleLoader* parent, VM* vm);
+ModuleLoader*
+module_loader_create_with_hierarchy(ModuleLoaderType type, const char* name, ModuleLoader* parent, VM* vm);
 void module_loader_destroy(ModuleLoader* loader);
 void module_loader_add_search_path(ModuleLoader* loader, const char* path);
 

@@ -24,43 +24,43 @@ endif()
 
 # Source files - using refactored versions where available
 set(LEXER_SOURCES
-    src/lexer/token_refactored.c
-    src/lexer/lexer_refactored.c
+    src/lexer/token.c
+    src/lexer/lexer.c
 )
 
 set(AST_SOURCES
-    src/ast/ast_refactored.c
+    src/ast/ast.c
     src/ast/ast_printer.c  # Not refactored yet
 )
 
 set(PARSER_SOURCES
-    src/parser/parser_refactored.c
+    src/parser/parser.c
 )
 
 set(VM_SOURCES
-    src/runtime/core/vm_complete_refactored.c
-    src/runtime/core/object_complete_refactored.c
-    src/runtime/core/object_hash_refactored.c
-    src/runtime/core/string_pool_complete_refactored.c
+    src/runtime/core/vm_complete.c
+    src/runtime/core/object_complete.c
+    src/runtime/core/object_hash.c
+    src/runtime/core/string_pool_complete.c
 )
 
 set(CODEGEN_SOURCES
-    src/codegen/compiler_refactored.c
+    src/codegen/compiler.c
 )
 
 set(DEBUG_SOURCES
-    src/debug/debug_refactored.c
+    src/debug/debug.c
 )
 
 set(UTILS_SOURCES
-    src/utils/error_refactored.c
+    src/utils/error.c
     src/utils/test_framework.c  # Not refactored yet
     src/utils/syntax_test.c  # Not refactored yet
     src/utils/cli.c  # Not refactored yet
     src/utils/logger.c  # Not refactored yet
     src/utils/compiler_wrapper.c  # Not refactored yet
     src/utils/bytecode_format.c  # Not refactored yet
-    src/utils/hash_map_refactored.c
+    src/utils/hash_map.c
     src/utils/version.c  # Not refactored yet
     src/utils/memory.c
     src/utils/memory_platform.c
@@ -76,7 +76,7 @@ set(SEMANTIC_SOURCES
     src/semantic/visitor.c  # Not refactored yet
     src/semantic/type.c  # Not refactored yet
     src/semantic/symbol_table.c  # Not refactored yet
-    src/semantic/analyzer_refactored.c
+    src/semantic/analyzer.c
 )
 
 set(RUNTIME_SOURCES
@@ -85,23 +85,23 @@ set(RUNTIME_SOURCES
     src/runtime/core/bootstrap.c  # Not refactored yet
     
     # Module loader
-    src/runtime/modules/loader/module_loader_refactored.c
-    src/runtime/modules/loader/module_cache_refactored.c
+    src/runtime/modules/loader/module_loader.c
+    src/runtime/modules/loader/module_cache.c
     src/runtime/modules/loader/module_compiler.c  # Not refactored yet
     
     # Module formats
-    src/runtime/modules/formats/module_format_refactored.c
-    src/runtime/modules/formats/module_archive_refactored.c
-    src/runtime/modules/formats/module_bundle_refactored.c
+    src/runtime/modules/formats/module_format.c
+    src/runtime/modules/formats/module_archive.c
+    src/runtime/modules/formats/module_bundle.c
     
     # Module extensions
-    src/runtime/modules/extensions/module_hooks_refactored.c
-    src/runtime/modules/extensions/module_inspect_refactored.c
-    src/runtime/modules/extensions/module_natives_refactored.c
+    src/runtime/modules/extensions/module_hooks.c
+    src/runtime/modules/extensions/module_inspect.c
+    src/runtime/modules/extensions/module_natives.c
     
     # Module lifecycle
     src/runtime/modules/lifecycle/module_unload.c  # Not refactored yet
-    src/runtime/modules/lifecycle/builtin_modules_refactored.c
+    src/runtime/modules/lifecycle/builtin_modules.c
     
     # Package management
     src/runtime/packages/package.c  # Not refactored yet
@@ -109,7 +109,7 @@ set(RUNTIME_SOURCES
 )
 
 set(STDLIB_SOURCES
-    src/stdlib/stdlib_refactored.c
+    src/stdlib/stdlib.c
 )
 
 # Create static library

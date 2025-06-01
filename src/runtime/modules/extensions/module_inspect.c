@@ -3,7 +3,8 @@
 #include "runtime/modules/loader/module_cache.h"
 #include "runtime/core/vm.h"
 #include "utils/hash_map.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -11,6 +12,7 @@
 
 /**
  * Implementation of module metadata inspection API.
+ * Refactored to use custom memory allocator API.
  */
 
 // Module state tracking (for statistics)
@@ -29,7 +31,7 @@ typedef struct ModuleMetrics {
 static HashMap* g_module_metrics = NULL;
 
 // Initialize metrics tracking
-static void ensure_metrics_initialized() {
+static void ensure_metrics_initialized(void) {
     if (!g_module_metrics) {
         g_module_metrics = hash_map_create();
     }
@@ -41,7 +43,7 @@ static ModuleMetrics* get_module_metrics(const char* module_path) {
     
     ModuleMetrics* metrics = (ModuleMetrics*)hash_map_get(g_module_metrics, module_path);
     if (!metrics) {
-        metrics = calloc(1, sizeof(ModuleMetrics));
+        metrics = MODULES_NEW_ZERO(ModuleMetrics);
         hash_map_put(g_module_metrics, module_path, metrics);
     }
     return metrics;
@@ -51,7 +53,7 @@ static ModuleMetrics* get_module_metrics(const char* module_path) {
 ModuleInfo* module_get_info(Module* module) {
     if (!module) return NULL;
     
-    ModuleInfo* info = calloc(1, sizeof(ModuleInfo));
+    ModuleInfo* info = MODULES_NEW_ZERO(ModuleInfo);
     info->path = module->path;
     info->absolute_path = module->absolute_path;
     info->version = module->version;
@@ -79,7 +81,7 @@ ModuleInfo* module_get_info(Module* module) {
 void module_info_free(ModuleInfo* info) {
     if (info) {
         // Note: strings are owned by the module, don't free them
-        free(info);
+        MODULES_FREE(info, sizeof(ModuleInfo));
     }
 }
 
@@ -95,9 +97,15 @@ static void collect_module(const char* name, Module* module, void* user_data) {
     ModuleCollector* collector = (ModuleCollector*)user_data;
     
     if (collector->count >= collector->capacity) {
+        size_t old_capacity = collector->capacity;
         collector->capacity = collector->capacity ? collector->capacity * 2 : 8;
-        collector->modules = realloc(collector->modules, 
-                                   collector->capacity * sizeof(Module*));
+        
+        Module** new_modules = MODULES_NEW_ARRAY(Module*, collector->capacity);
+        if (collector->modules) {
+            memcpy(new_modules, collector->modules, collector->count * sizeof(Module*));
+            MODULES_FREE(collector->modules, old_capacity * sizeof(Module*));
+        }
+        collector->modules = new_modules;
     }
     
     collector->modules[collector->count++] = module;
@@ -137,7 +145,7 @@ ExportInfo* module_get_exports(Module* module, size_t* count) {
     *count = module->exports.count;
     if (*count == 0) return NULL;
     
-    ExportInfo* exports = calloc(*count, sizeof(ExportInfo));
+    ExportInfo* exports = MODULES_NEW_ARRAY_ZERO(ExportInfo, *count);
     
     for (size_t i = 0; i < *count; i++) {
         exports[i].name = module->exports.names[i];
@@ -187,9 +195,9 @@ ExportInfo* module_get_export_info(Module* module, const char* export_name) {
             size_t count = 1;
             ExportInfo* exports = module_get_exports(module, &count);
             if (exports) {
-                ExportInfo* result = malloc(sizeof(ExportInfo));
+                ExportInfo* result = MODULES_NEW(ExportInfo);
                 *result = exports[i];
-                free(exports);
+                MODULES_FREE(exports, count * sizeof(ExportInfo));
                 return result;
             }
         }
@@ -201,7 +209,7 @@ ExportInfo* module_get_export_info(Module* module, const char* export_name) {
 // Free export information
 void module_exports_free(ExportInfo* exports, size_t count) {
     if (exports) {
-        free(exports);
+        MODULES_FREE(exports, count * sizeof(ExportInfo));
     }
 }
 
@@ -217,7 +225,7 @@ DependencyInfo* module_get_dependencies(Module* module, size_t* count) {
 // Free dependency information
 void module_dependencies_free(DependencyInfo* deps, size_t count) {
     if (deps) {
-        free(deps);
+        MODULES_FREE(deps, count * sizeof(DependencyInfo));
     }
 }
 
@@ -225,7 +233,7 @@ void module_dependencies_free(DependencyInfo* deps, size_t count) {
 ModuleStats* module_get_stats(Module* module) {
     if (!module) return NULL;
     
-    ModuleStats* stats = calloc(1, sizeof(ModuleStats));
+    ModuleStats* stats = MODULES_NEW_ZERO(ModuleStats);
     ModuleMetrics* metrics = get_module_metrics(module->path);
     
     if (metrics->load_end > metrics->load_start) {
@@ -246,7 +254,7 @@ ModuleStats* module_get_stats(Module* module) {
 // Free module statistics
 void module_stats_free(ModuleStats* stats) {
     if (stats) {
-        free(stats);
+        MODULES_FREE(stats, sizeof(ModuleStats));
     }
 }
 
@@ -317,15 +325,19 @@ char* module_to_json(Module* module, bool include_exports, bool include_stats) {
     
     // Start with a reasonable size
     size_t capacity = 1024;
-    char* json = malloc(capacity);
+    char* json = MODULES_ALLOC(capacity);
     size_t len = 0;
     
     // Helper macro to append to JSON string
     #define APPEND(fmt, ...) do { \
         int written = snprintf(json + len, capacity - len, fmt, ##__VA_ARGS__); \
         if (written >= 0 && (size_t)written >= capacity - len) { \
+            size_t old_capacity = capacity; \
             capacity *= 2; \
-            json = realloc(json, capacity); \
+            char* new_json = MODULES_ALLOC(capacity); \
+            memcpy(new_json, json, len); \
+            MODULES_FREE(json, old_capacity); \
+            json = new_json; \
             written = snprintf(json + len, capacity - len, fmt, ##__VA_ARGS__); \
         } \
         if (written > 0) len += written; \
@@ -375,14 +387,18 @@ char* module_loader_to_json(ModuleLoader* loader) {
     if (!loader) return NULL;
     
     size_t capacity = 1024;
-    char* json = malloc(capacity);
+    char* json = MODULES_ALLOC(capacity);
     size_t len = 0;
     
     #define APPEND(fmt, ...) do { \
         int written = snprintf(json + len, capacity - len, fmt, ##__VA_ARGS__); \
         if (written >= 0 && (size_t)written >= capacity - len) { \
+            size_t old_capacity = capacity; \
             capacity *= 2; \
-            json = realloc(json, capacity); \
+            char* new_json = MODULES_ALLOC(capacity); \
+            memcpy(new_json, json, len); \
+            MODULES_FREE(json, old_capacity); \
+            json = new_json; \
             written = snprintf(json + len, capacity - len, fmt, ##__VA_ARGS__); \
         } \
         if (written > 0) len += written; \
@@ -397,14 +413,20 @@ char* module_loader_to_json(ModuleLoader* loader) {
         if (i > 0) APPEND(",");
         char* module_json = module_to_json(modules[i], false, false);
         if (module_json) {
+            size_t module_json_len = strlen(module_json);
             APPEND("%s", module_json);
-            free(module_json);
+            MODULES_FREE(module_json, module_json_len + 1);
         }
     }
     
     APPEND("],\"count\":%zu}", module_count);
     
-    if (modules) free(modules);
+    if (modules) {
+        // Free the module array (but not the modules themselves)
+        size_t array_size = module_count * sizeof(Module*);
+        if (array_size == 0) array_size = 8 * sizeof(Module*); // minimum capacity
+        MODULES_FREE(modules, array_size);
+    }
     
     #undef APPEND
     
@@ -496,7 +518,7 @@ void module_print_dependency_tree(Module* module, int max_depth) {
             fprintf(stderr, "\n");
         }
         
-        free(deps);
+        module_dependencies_free(deps, dep_count);
     } else if (max_depth > 0) {
         fprintf(stderr, "  No dependencies\n");
     }
@@ -551,4 +573,41 @@ void module_track_init_end(Module* module) {
     
     ModuleMetrics* metrics = get_module_metrics(module->path);
     metrics->init_end = clock();
+}
+
+// Cleanup function for module inspection subsystem
+void module_inspect_cleanup(void) {
+    if (g_module_metrics) {
+        // Free all metrics stored in the hash map
+        // Note: This requires iterating through the hash map and freeing values
+        // TODO: Implement hash map iteration with callback for cleanup
+        
+        // For now, just destroy the hash map (this will leak the metrics)
+        hash_map_destroy(g_module_metrics);
+        g_module_metrics = NULL;
+    }
+}
+
+// Free a single export info (for module_get_export_info)
+void module_export_info_free(ExportInfo* info) {
+    if (info) {
+        MODULES_FREE(info, sizeof(ExportInfo));
+    }
+}
+
+// Free JSON string returned by module_to_json or module_loader_to_json
+void module_json_free(char* json) {
+    if (json) {
+        size_t len = strlen(json) + 1;
+        MODULES_FREE(json, len);
+    }
+}
+
+// Free module array returned by various find functions
+void module_array_free(Module** modules, size_t count) {
+    if (modules) {
+        size_t array_size = count * sizeof(Module*);
+        if (array_size == 0) array_size = 8 * sizeof(Module*); // minimum capacity
+        MODULES_FREE(modules, array_size);
+    }
 }

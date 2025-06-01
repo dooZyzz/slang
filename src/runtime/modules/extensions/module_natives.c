@@ -2,7 +2,8 @@
 #include "runtime/core/object.h"
 #include "runtime/modules/loader/module_loader.h"
 #include "runtime/modules/extensions/module_inspect.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -20,11 +21,13 @@ static TaggedValue native_current_module(int arg_count, TaggedValue* args) {
         return NIL_VAL;
     }
     
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Return module as an object with metadata
     Object* mod_obj = object_create();
-    object_set_property(mod_obj, "path", STRING_VAL(strdup(g_vm->current_module->path)));
+    object_set_property(mod_obj, "path", STRING_VAL(STRINGS_STRDUP(g_vm->current_module->path)));
     object_set_property(mod_obj, "version", 
-        g_vm->current_module->version ? STRING_VAL(strdup(g_vm->current_module->version)) : NIL_VAL);
+        g_vm->current_module->version ? STRING_VAL(STRINGS_STRDUP(g_vm->current_module->version)) : NIL_VAL);
     object_set_property(mod_obj, "is_native", BOOL_VAL(g_vm->current_module->is_native));
     object_set_property(mod_obj, "is_lazy", BOOL_VAL(g_vm->current_module->chunk != NULL));
     // Store module pointer as a number (cast to uintptr_t)
@@ -38,6 +41,9 @@ static TaggedValue native_loaded_modules(int arg_count, TaggedValue* args) {
         return OBJECT_VAL(array_create());
     }
     
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     size_t count;
     Module** modules = module_get_all_loaded(g_vm->module_loader, &count);
     
@@ -46,16 +52,16 @@ static TaggedValue native_loaded_modules(int arg_count, TaggedValue* args) {
     for (size_t i = 0; i < count; i++) {
         Module* mod = modules[i];
         Object* mod_obj = object_create();
-        object_set_property(mod_obj, "path", STRING_VAL(strdup(mod->path)));
+        object_set_property(mod_obj, "path", STRING_VAL(STRINGS_STRDUP(mod->path)));
         object_set_property(mod_obj, "version", 
-            mod->version ? STRING_VAL(strdup(mod->version)) : NIL_VAL);
+            mod->version ? STRING_VAL(STRINGS_STRDUP(mod->version)) : NIL_VAL);
         object_set_property(mod_obj, "is_native", BOOL_VAL(mod->is_native));
         object_set_property(mod_obj, "is_lazy", BOOL_VAL(mod->chunk != NULL));
         object_set_property(mod_obj, "_internal", NUMBER_VAL((double)(uintptr_t)mod));
         array_push(array, OBJECT_VAL(mod_obj));
     }
     
-    free(modules);
+    MODULES_FREE(modules, count * sizeof(Module*));
     return OBJECT_VAL(array);
 }
 
@@ -64,6 +70,8 @@ static TaggedValue native_module_exports(int arg_count, TaggedValue* args) {
     if (arg_count != 1 || !IS_OBJECT(args[0])) {
         return OBJECT_VAL(array_create());
     }
+    
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     Object* mod_obj = AS_OBJECT(args[0]);
     TaggedValue* internal = object_get_property(mod_obj, "_internal");
@@ -79,8 +87,8 @@ static TaggedValue native_module_exports(int arg_count, TaggedValue* args) {
     
     for (size_t i = 0; i < count; i++) {
         Object* exp_obj = object_create();
-        object_set_property(exp_obj, "name", STRING_VAL(strdup(exports[i].name)));
-        object_set_property(exp_obj, "type", STRING_VAL(strdup(exports[i].type_name)));
+        object_set_property(exp_obj, "name", STRING_VAL(STRINGS_STRDUP(exports[i].name)));
+        object_set_property(exp_obj, "type", STRING_VAL(STRINGS_STRDUP(exports[i].type_name)));
         object_set_property(exp_obj, "is_function", BOOL_VAL(exports[i].is_function));
         object_set_property(exp_obj, "is_constant", BOOL_VAL(exports[i].is_constant));
         array_push(array, OBJECT_VAL(exp_obj));
@@ -93,17 +101,20 @@ static TaggedValue native_module_exports(int arg_count, TaggedValue* args) {
 // __module_state__(module): Get module state as string
 static TaggedValue native_module_state(int arg_count, TaggedValue* args) {
     if (arg_count != 1 || !IS_OBJECT(args[0])) {
-        return STRING_VAL(strdup("unknown"));
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRING_VAL(STRINGS_STRDUP("unknown"));
     }
+    
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     Object* mod_obj = AS_OBJECT(args[0]);
     TaggedValue* internal = object_get_property(mod_obj, "_internal");
     if (!internal || !IS_NUMBER(*internal)) {
-        return STRING_VAL(strdup("unknown"));
+        return STRING_VAL(STRINGS_STRDUP("unknown"));
     }
     
     Module* module = (Module*)(uintptr_t)AS_NUMBER(*internal);
-    return STRING_VAL(strdup(module_state_to_string(module->state)));
+    return STRING_VAL(STRINGS_STRDUP(module_state_to_string(module->state)));
 }
 
 // __module_stats__(module): Get module statistics
@@ -157,7 +168,8 @@ static TaggedValue native_module_info(int arg_count, TaggedValue* args) {
         }
     }
     
-    return STRING_VAL(strdup("{}"));
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    return STRING_VAL(STRINGS_STRDUP("{}"));
 }
 
 // Register module introspection natives

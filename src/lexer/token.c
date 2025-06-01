@@ -1,5 +1,7 @@
 #include "lexer/token.h"
+#include "utils/allocators.h"
 #include <stdlib.h>
+#include <string.h>
 
 const char* token_type_to_string(TokenType type) {
     static const char* token_names[] = {
@@ -117,7 +119,10 @@ void token_free(Token* token) {
             token->type == TOKEN_STRING_INTERP_START ||
             token->type == TOKEN_STRING_INTERP_MID ||
             token->type == TOKEN_STRING_INTERP_END) {
-            free(token->literal.string_value);
+            // Tokens typically use parser allocator
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            MEM_FREE(alloc, token->literal.string_value, 
+                    strlen(token->literal.string_value) + 1);
             token->literal.string_value = NULL;
         }
     }

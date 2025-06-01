@@ -1,6 +1,6 @@
 #include "utils/error.h"
+#include "utils/allocators.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 
@@ -43,17 +43,19 @@ static const char* color_bold = "\033[1m";
 static const char* color_reset = "\033[0m";
 
 ErrorReporter* error_reporter_create(void) {
-    ErrorReporter* reporter = calloc(1, sizeof(ErrorReporter));
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
+    ErrorReporter* reporter = MEM_ALLOC_ZERO(alloc, sizeof(ErrorReporter));
     if (!reporter) return NULL;
     
     reporter->errors.capacity = 16;
-    reporter->errors.errors = calloc(reporter->errors.capacity, sizeof(ErrorInfo));
+    reporter->errors.errors = MEM_ALLOC_ZERO(alloc, reporter->errors.capacity * sizeof(ErrorInfo));
     
     reporter->warnings.capacity = 16;
-    reporter->warnings.errors = calloc(reporter->warnings.capacity, sizeof(ErrorInfo));
+    reporter->warnings.errors = MEM_ALLOC_ZERO(alloc, reporter->warnings.capacity * sizeof(ErrorInfo));
     
     reporter->source_capacity = 4;
-    reporter->sources = calloc(reporter->source_capacity, sizeof(SourceFile));
+    reporter->sources = MEM_ALLOC_ZERO(alloc, reporter->source_capacity * sizeof(SourceFile));
     
     reporter->color_enabled = true;
     reporter->max_errors = MAX_ERRORS_DEFAULT;
@@ -64,38 +66,74 @@ ErrorReporter* error_reporter_create(void) {
 void error_reporter_destroy(ErrorReporter* reporter) {
     if (!reporter) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
+    // Free error messages and suggestions
     for (size_t i = 0; i < reporter->errors.count; i++) {
-        free((void*)reporter->errors.errors[i].message);
-        free((void*)reporter->errors.errors[i].suggestion);
+        if (reporter->errors.errors[i].message) {
+            size_t msg_len = strlen(reporter->errors.errors[i].message) + 1;
+            MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
+        }
+        if (reporter->errors.errors[i].suggestion) {
+            size_t sug_len = strlen(reporter->errors.errors[i].suggestion) + 1;
+            MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
+        }
     }
-    free(reporter->errors.errors);
+    MEM_FREE(alloc, reporter->errors.errors, reporter->errors.capacity * sizeof(ErrorInfo));
     
+    // Free warning messages and suggestions
     for (size_t i = 0; i < reporter->warnings.count; i++) {
-        free((void*)reporter->warnings.errors[i].message);
-        free((void*)reporter->warnings.errors[i].suggestion);
+        if (reporter->warnings.errors[i].message) {
+            size_t msg_len = strlen(reporter->warnings.errors[i].message) + 1;
+            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
+        }
+        if (reporter->warnings.errors[i].suggestion) {
+            size_t sug_len = strlen(reporter->warnings.errors[i].suggestion) + 1;
+            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
+        }
     }
-    free(reporter->warnings.errors);
+    MEM_FREE(alloc, reporter->warnings.errors, reporter->warnings.capacity * sizeof(ErrorInfo));
     
+    // Free source files
     for (size_t i = 0; i < reporter->source_count; i++) {
-        free(reporter->sources[i].filename);
-        free(reporter->sources[i].source);
+        if (reporter->sources[i].filename) {
+            size_t fname_len = strlen(reporter->sources[i].filename) + 1;
+            MEM_FREE(alloc, reporter->sources[i].filename, fname_len);
+        }
+        if (reporter->sources[i].source) {
+            size_t src_len = strlen(reporter->sources[i].source) + 1;
+            MEM_FREE(alloc, reporter->sources[i].source, src_len);
+        }
     }
-    free(reporter->sources);
+    MEM_FREE(alloc, reporter->sources, reporter->source_capacity * sizeof(SourceFile));
     
-    free(reporter);
+    MEM_FREE(alloc, reporter, sizeof(ErrorReporter));
 }
 
 static void error_list_add(ErrorList* list, const ErrorInfo* info) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
     if (list->count >= list->capacity) {
+        size_t old_capacity = list->capacity;
         list->capacity *= 2;
-        list->errors = realloc(list->errors, list->capacity * sizeof(ErrorInfo));
+        
+        // Allocate new array
+        ErrorInfo* new_errors = MEM_ALLOC_ZERO(alloc, list->capacity * sizeof(ErrorInfo));
+        
+        // Copy old data
+        if (list->errors) {
+            memcpy(new_errors, list->errors, old_capacity * sizeof(ErrorInfo));
+            MEM_FREE(alloc, list->errors, old_capacity * sizeof(ErrorInfo));
+        }
+        
+        list->errors = new_errors;
     }
     
     ErrorInfo* error = &list->errors[list->count++];
     *error = *info;
-    error->message = strdup(info->message);
+    error->message = MEM_STRDUP(alloc, info->message);
     if (info->suggestion) {
-        error->suggestion = strdup(info->suggestion);
+        error->suggestion = MEM_STRDUP(alloc, info->suggestion);
     }
 }
 
@@ -207,22 +245,38 @@ void error_report_simple(ErrorReporter* reporter, ErrorLevel level, ErrorPhase p
 void error_set_source(ErrorReporter* reporter, const char* filename, const char* source) {
     if (!reporter || !filename || !source) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
     SourceFile* existing = find_source(reporter, filename);
     if (existing) {
-        free(existing->source);
-        existing->source = strdup(source);
+        // Free old source
+        if (existing->source) {
+            size_t old_len = strlen(existing->source) + 1;
+            MEM_FREE(alloc, existing->source, old_len);
+        }
+        existing->source = MEM_STRDUP(alloc, source);
         return;
     }
     
     if (reporter->source_count >= reporter->source_capacity) {
+        size_t old_capacity = reporter->source_capacity;
         reporter->source_capacity *= 2;
-        reporter->sources = realloc(reporter->sources,
-                                   reporter->source_capacity * sizeof(SourceFile));
+        
+        // Allocate new array
+        SourceFile* new_sources = MEM_ALLOC_ZERO(alloc, reporter->source_capacity * sizeof(SourceFile));
+        
+        // Copy old data
+        if (reporter->sources) {
+            memcpy(new_sources, reporter->sources, old_capacity * sizeof(SourceFile));
+            MEM_FREE(alloc, reporter->sources, old_capacity * sizeof(SourceFile));
+        }
+        
+        reporter->sources = new_sources;
     }
     
     SourceFile* file = &reporter->sources[reporter->source_count++];
-    file->filename = strdup(filename);
-    file->source = strdup(source);
+    file->filename = MEM_STRDUP(alloc, filename);
+    file->source = MEM_STRDUP(alloc, source);
 }
 
 void error_print_context(ErrorReporter* reporter, const SourceLocation* location) {
@@ -296,15 +350,31 @@ size_t warning_count(const ErrorReporter* reporter) {
 void error_clear(ErrorReporter* reporter) {
     if (!reporter) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
+    // Free error messages and suggestions
     for (size_t i = 0; i < reporter->errors.count; i++) {
-        free((void*)reporter->errors.errors[i].message);
-        free((void*)reporter->errors.errors[i].suggestion);
+        if (reporter->errors.errors[i].message) {
+            size_t msg_len = strlen(reporter->errors.errors[i].message) + 1;
+            MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
+        }
+        if (reporter->errors.errors[i].suggestion) {
+            size_t sug_len = strlen(reporter->errors.errors[i].suggestion) + 1;
+            MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
+        }
     }
     reporter->errors.count = 0;
     
+    // Free warning messages and suggestions
     for (size_t i = 0; i < reporter->warnings.count; i++) {
-        free((void*)reporter->warnings.errors[i].message);
-        free((void*)reporter->warnings.errors[i].suggestion);
+        if (reporter->warnings.errors[i].message) {
+            size_t msg_len = strlen(reporter->warnings.errors[i].message) + 1;
+            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
+        }
+        if (reporter->warnings.errors[i].suggestion) {
+            size_t sug_len = strlen(reporter->warnings.errors[i].suggestion) + 1;
+            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
+        }
     }
     reporter->warnings.count = 0;
     

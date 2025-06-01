@@ -1,4 +1,5 @@
 #include "lexer/lexer.h"
+#include "utils/allocators.h"
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -65,7 +66,9 @@ Lexer* lexer_create(const char* source)
 {
     LOG_DEBUG(LOG_MODULE_LEXER, "Creating lexer with source length: %zu", strlen(source));
     
-    Lexer* lexer = malloc(sizeof(Lexer));
+    // Lexer uses parser allocator - temporary lifetime
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+    Lexer* lexer = MEM_NEW(alloc, Lexer);
     if (!lexer) {
         LOG_ERROR(LOG_MODULE_LEXER, "Failed to allocate memory for lexer");
         return NULL;
@@ -87,7 +90,10 @@ Lexer* lexer_create(const char* source)
 
 void lexer_destroy(Lexer* lexer)
 {
-    free(lexer);
+    if (lexer) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+        MEM_FREE(alloc, lexer, sizeof(Lexer));
+    }
 }
 
 bool lexer_is_at_end(const Lexer* lexer)
@@ -149,6 +155,7 @@ static void skip_whitespace(Lexer* lexer)
         case '/':
             if (peek_next(lexer) == '/')
             {
+                // Comment until end of line
                 while (peek(lexer) != '\n' && !lexer_is_at_end(lexer))
                 {
                     advance(lexer);
@@ -156,8 +163,10 @@ static void skip_whitespace(Lexer* lexer)
             }
             else if (peek_next(lexer) == '*')
             {
-                advance(lexer);
-                advance(lexer);
+                // Block comment with nesting support
+                advance(lexer); // /
+                advance(lexer); // *
+                
                 int depth = 1;
                 while (depth > 0 && !lexer_is_at_end(lexer))
                 {
@@ -190,54 +199,37 @@ static void skip_whitespace(Lexer* lexer)
     }
 }
 
-static Token make_token(Lexer* lexer, TokenType type, size_t start)
+static Token make_token(Lexer* lexer, TokenType type, size_t start, size_t length)
 {
-    Token token = {
-        .type = type,
-        .lexeme = lexer->source + start,
-        .lexeme_length = lexer->current - start,
-        .line = lexer->token_line,
-        .column = lexer->token_column
-    };
-    if (debug_flags.print_tokens)
-    {
-        printf("[%zu:%zu] %s '%.*s'\n",
-               token.line, token.column,
-               token_type_to_string(type),
-               (int)token.lexeme_length, token.lexeme);
-    }
+    LOG_TRACE(LOG_MODULE_LEXER, "Creating token type %d at line %zu, col %zu", 
+              type, lexer->line, start - lexer->line_start + 1);
+    
+    Token token;
+    token.type = type;
+    token.lexeme = &lexer->source[start];
+    token.lexeme_length = length;
+    token.line = lexer->line;
+    token.column = start - lexer->line_start + 1;
     return token;
 }
 
-static Token make_error_token(Lexer* lexer, const char* message)
+static Token error_token(Lexer* lexer, const char* message)
 {
-    Token token = {
-        .type = TOKEN_ERROR,
-        .lexeme = message,
-        .lexeme_length = strlen(message),
-        .line = lexer->line,
-        .column = lexer->column
-    };
-    if (debug_flags.print_tokens)
-    {
-        printf("[%zu:%zu] ERROR: %s\n", token.line, token.column, message);
-    }
+    LOG_ERROR(LOG_MODULE_LEXER, "Lexer error at line %zu: %s", lexer->line, message);
+    
+    Token token;
+    token.type = TOKEN_ERROR;
+    token.lexeme = message;
+    token.lexeme_length = strlen(message);
+    token.line = lexer->line;
+    token.column = lexer->column;
     return token;
-}
-
-static bool is_alpha(char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
-}
-
-static bool is_alnum(char c)
-{
-    return is_alpha(c) || isdigit(c);
 }
 
 // Process escape sequences in a string and return the processed string
 static char* process_escape_sequences(const char* src, size_t length) {
-    char* result = malloc(length + 1);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+    char* result = MEM_NEW_ARRAY(alloc, char, length + 1);
     if (!result) return NULL;
     
     size_t dst_index = 0;
@@ -266,10 +258,10 @@ static char* process_escape_sequences(const char* src, size_t length) {
     return result;
 }
 
-static Token scan_string(Lexer* lexer)
+static Token string(Lexer* lexer)
 {
     size_t start = lexer->current - 1;
-    size_t string_start = lexer->current;
+    size_t string_start = lexer->current; // Start after the opening quote
     
     // Scan the string to check for interpolations
     while (peek(lexer) != '"' && !lexer_is_at_end(lexer))
@@ -288,7 +280,7 @@ static Token scan_string(Lexer* lexer)
             // Found interpolation - return the string part before it
             size_t string_length = lexer->current - string_start;
             
-            Token token = make_token(lexer, TOKEN_STRING_INTERP_START, start);
+            Token token = make_token(lexer, TOKEN_STRING_INTERP_START, start, lexer->current - start);
             token.literal.string_value = process_escape_sequences(lexer->source + string_start, string_length);
             
             // Mark that we're in an interpolated string
@@ -305,130 +297,17 @@ static Token scan_string(Lexer* lexer)
 
     if (lexer_is_at_end(lexer))
     {
-        return make_error_token(lexer, "Unterminated string");
+        return error_token(lexer, "Unterminated string");
     }
 
     // No interpolation, regular string
     size_t string_length = lexer->current - string_start;
     advance(lexer); // consume closing quote
-
-    Token token = make_token(lexer, TOKEN_STRING, start);
+    
+    Token token = make_token(lexer, TOKEN_STRING, start, lexer->current - start);
     token.literal.string_value = process_escape_sequences(lexer->source + string_start, string_length);
-
+    
     return token;
-}
-
-static Token scan_character(Lexer* lexer)
-{
-    size_t start = lexer->current - 1;
-
-    if (lexer_is_at_end(lexer))
-    {
-        return make_error_token(lexer, "Unterminated character literal");
-    }
-
-    char c;
-    if (peek(lexer) == '\\')
-    {
-        advance(lexer);
-        if (lexer_is_at_end(lexer))
-        {
-            return make_error_token(lexer, "Unterminated character literal");
-        }
-        char escape = advance(lexer);
-        switch (escape)
-        {
-        case 'n': c = '\n';
-            break;
-        case 't': c = '\t';
-            break;
-        case 'r': c = '\r';
-            break;
-        case '\\': c = '\\';
-            break;
-        case '\'': c = '\'';
-            break;
-        case '"': c = '"';
-            break;
-        case '0': c = '\0';
-            break;
-        default:
-            return make_error_token(lexer, "Invalid escape sequence");
-        }
-    }
-    else
-    {
-        c = advance(lexer);
-    }
-
-    if (peek(lexer) != '\'')
-    {
-        return make_error_token(lexer, "Unterminated character literal");
-    }
-    advance(lexer);
-
-    Token token = make_token(lexer, TOKEN_CHARACTER, start);
-    token.literal.character_value = c;
-    return token;
-}
-
-static Token scan_number(Lexer* lexer)
-{
-    size_t start = lexer->current - 1;
-    bool is_float = false;
-
-    while (isdigit(peek(lexer)))
-    {
-        advance(lexer);
-    }
-
-    if (peek(lexer) == '.' && isdigit(peek_next(lexer)))
-    {
-        is_float = true;
-        advance(lexer);
-        while (isdigit(peek(lexer)))
-        {
-            advance(lexer);
-        }
-    }
-
-    Token token = make_token(lexer, is_float ? TOKEN_FLOAT : TOKEN_INTEGER, start);
-
-    if (is_float)
-    {
-        char* end;
-        token.literal.float_value = strtod(lexer->source + start, &end);
-    }
-    else
-    {
-        char* end;
-        token.literal.integer_value = strtoll(lexer->source + start, &end, 10);
-    }
-
-    return token;
-}
-
-static Token scan_identifier(Lexer* lexer)
-{
-    size_t start = lexer->current - 1;
-
-    while (is_alnum(peek(lexer)))
-    {
-        advance(lexer);
-    }
-
-    size_t length = lexer->current - start;
-
-    for (const Keyword* kw = keywords; kw->keyword != NULL; kw++)
-    {
-        if (strlen(kw->keyword) == length &&
-            memcmp(lexer->source + start, kw->keyword, length) == 0)
-        {
-            return make_token(lexer, kw->type, start);
-        }
-    }
-
-    return make_token(lexer, TOKEN_IDENTIFIER, start);
 }
 
 static Token scan_string_continuation(Lexer* lexer)
@@ -464,26 +343,158 @@ static Token scan_string_continuation(Lexer* lexer)
     if (peek(lexer) == '$')
     {
         // More interpolation coming
-        token = make_token(lexer, TOKEN_STRING_INTERP_MID, start);
+        token = make_token(lexer, TOKEN_STRING_INTERP_MID, start, lexer->current - start);
         // Keep in_string_interp true for next iteration
     }
     else if (peek(lexer) == '"')
     {
         // End of string
         advance(lexer); // consume closing quote
-        token = make_token(lexer, TOKEN_STRING_INTERP_END, start);
+        token = make_token(lexer, TOKEN_STRING_INTERP_END, start, lexer->current - start);
         lexer->in_string_interp = false;
         lexer->interp_brace_depth = 0;
     }
     else
     {
-        return make_error_token(lexer, "Unterminated string");
+        return error_token(lexer, "Unterminated string");
     }
 
     // Even if string_length is 0 (empty string between interpolations), process it
     token.literal.string_value = process_escape_sequences(lexer->source + string_start, string_length);
 
     return token;
+}
+
+static Token character(Lexer* lexer)
+{
+    size_t start = lexer->current - 1;
+
+    if (lexer_is_at_end(lexer))
+    {
+        return error_token(lexer, "Unterminated character literal");
+    }
+
+    char c;
+    if (peek(lexer) == '\\')
+    {
+        advance(lexer);
+        if (lexer_is_at_end(lexer))
+        {
+            return error_token(lexer, "Unterminated character literal");
+        }
+        char escape = advance(lexer);
+        switch (escape)
+        {
+        case 'n': c = '\n';
+            break;
+        case 't': c = '\t';
+            break;
+        case 'r': c = '\r';
+            break;
+        case '\\': c = '\\';
+            break;
+        case '\'': c = '\'';
+            break;
+        case '"': c = '"';
+            break;
+        case '0': c = '\0';
+            break;
+        default:
+            return error_token(lexer, "Invalid escape sequence");
+        }
+    }
+    else
+    {
+        c = advance(lexer);
+    }
+
+    if (peek(lexer) != '\'')
+    {
+        return error_token(lexer, "Unterminated character literal");
+    }
+    advance(lexer);
+
+    Token token = make_token(lexer, TOKEN_CHARACTER, start, lexer->current - start);
+    token.literal.character_value = c;
+
+    return token;
+}
+
+
+static Token number(Lexer* lexer)
+{
+    size_t start = lexer->current - 1;
+    bool is_float = false;
+
+    while (isdigit(peek(lexer)))
+    {
+        advance(lexer);
+    }
+
+    if (peek(lexer) == '.' && isdigit(peek_next(lexer)))
+    {
+        is_float = true;
+        advance(lexer); // Consume '.'
+        while (isdigit(peek(lexer)))
+        {
+            advance(lexer);
+        }
+    }
+
+    if (peek(lexer) == 'e' || peek(lexer) == 'E')
+    {
+        is_float = true;
+        advance(lexer);
+        if (peek(lexer) == '+' || peek(lexer) == '-')
+        {
+            advance(lexer);
+        }
+        while (isdigit(peek(lexer)))
+        {
+            advance(lexer);
+        }
+    }
+
+    Token token = make_token(lexer, is_float ? TOKEN_FLOAT : TOKEN_INTEGER, start, lexer->current - start);
+    
+    // Parse the numeric value
+    if (is_float)
+    {
+        char* end;
+        token.literal.float_value = strtod(lexer->source + start, &end);
+    }
+    else
+    {
+        char* end;
+        token.literal.integer_value = strtoll(lexer->source + start, &end, 10);
+    }
+    
+    return token;
+}
+
+static Token identifier(Lexer* lexer)
+{
+    size_t start = lexer->current - 1;
+
+    while (isalnum(peek(lexer)) || peek(lexer) == '_')
+    {
+        advance(lexer);
+    }
+
+    size_t length = lexer->current - start;
+    const char* text = &lexer->source[start];
+
+    // Check if it's a keyword
+    for (const Keyword* kw = keywords; kw->keyword != NULL; kw++)
+    {
+        size_t kw_len = strlen(kw->keyword);
+        if (kw_len == length && memcmp(text, kw->keyword, length) == 0)
+        {
+            return make_token(lexer, kw->type, start, length);
+        }
+    }
+
+    return make_token(lexer, TOKEN_IDENTIFIER, start, length);
 }
 
 Token lexer_next_token(Lexer* lexer)
@@ -508,20 +519,21 @@ Token lexer_next_token(Lexer* lexer)
             {
                 advance(lexer); // consume {
                 lexer->interp_brace_depth = 1;
-                return make_token(lexer, TOKEN_DOLLAR, start);
+                return make_token(lexer, TOKEN_DOLLAR, start, 2);
             }
-            else if (is_alpha(peek(lexer)))
+            else if (isalpha(peek(lexer)))
             {
                 // Simple $identifier - return just the identifier part
                 size_t ident_start = lexer->current;
-                while (is_alnum(peek(lexer)))
+                while (isalnum(peek(lexer)) || peek(lexer) == '_')
                 {
                     advance(lexer);
                 }
-                Token token = make_token(lexer, TOKEN_IDENTIFIER, ident_start);
+                Token token = make_token(lexer, TOKEN_IDENTIFIER, ident_start, lexer->current - ident_start);
                 // Set the identifier value
                 size_t ident_length = lexer->current - ident_start;
-                token.literal.string_value = malloc(ident_length + 1);
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+                token.literal.string_value = MEM_ALLOC(alloc, ident_length + 1);
                 if (token.literal.string_value) {
                     memcpy(token.literal.string_value, lexer->source + ident_start, ident_length);
                     token.literal.string_value[ident_length] = '\0';
@@ -532,7 +544,7 @@ Token lexer_next_token(Lexer* lexer)
             }
             else
             {
-                return make_error_token(lexer, "Invalid $ usage in string interpolation");
+                return error_token(lexer, "Invalid $ usage in string interpolation");
             }
         }
         // If we're still in string interp but not processing $, continue scanning the string
@@ -541,118 +553,100 @@ Token lexer_next_token(Lexer* lexer)
             return scan_string_continuation(lexer);
         }
     }
-    
+
     skip_whitespace(lexer);
 
     if (lexer_is_at_end(lexer))
     {
-        Token token = {
-            .type = TOKEN_EOF,
-            .lexeme = lexer->source + lexer->current,
-            .lexeme_length = 0,
-            .line = lexer->line,
-            .column = lexer->current - lexer->line_start + 1
-        };
-        if (debug_flags.print_tokens)
-        {
-            printf("[%zu:%zu] %s\n", token.line, token.column, token_type_to_string(token.type));
-        }
-        return token;
+        return make_token(lexer, TOKEN_EOF, lexer->current, 0);
     }
 
     size_t start = lexer->current;
-    lexer->token_line = lexer->line;
-    lexer->token_column = lexer->current - lexer->line_start + 1;
     char c = advance(lexer);
 
-    if (is_alpha(c))
+    // Handle closing brace in interpolation
+    if (lexer->in_string_interp && lexer->interp_brace_depth > 0)
     {
-        lexer->current = start;
-        advance(lexer);
-        return scan_identifier(lexer);
-    }
-
-    if (isdigit(c))
-    {
-        lexer->current = start;
-        advance(lexer);
-        return scan_number(lexer);
-    }
-
-    switch (c)
-    {
-    case '(': return make_token(lexer, TOKEN_LEFT_PAREN, start);
-    case ')': return make_token(lexer, TOKEN_RIGHT_PAREN, start);
-    case '{':
-        if (lexer->in_string_interp)
+        if (c == '{')
         {
             lexer->interp_brace_depth++;
         }
-        return make_token(lexer, TOKEN_LEFT_BRACE, start);
-    case '}':
-        if (lexer->in_string_interp)
+        else if (c == '}')
         {
             lexer->interp_brace_depth--;
             if (lexer->interp_brace_depth == 0)
             {
-                // End of interpolation expression
+                // Mark that we need to continue the string after this
                 lexer->just_closed_interp = true;
-                return make_token(lexer, TOKEN_RIGHT_BRACE, start);
             }
         }
-        return make_token(lexer, TOKEN_RIGHT_BRACE, start);
-    case '[': return make_token(lexer, TOKEN_LEFT_BRACKET, start);
-    case ']': return make_token(lexer, TOKEN_RIGHT_BRACKET, start);
-    case ',': return make_token(lexer, TOKEN_COMMA, start);
-    case ';': return make_token(lexer, TOKEN_SEMICOLON, start);
-    case ':': return make_token(lexer, TOKEN_COLON, start);
-    case '~': return make_token(lexer, TOKEN_TILDE, start);
-    case '^': return make_token(lexer, TOKEN_CARET, start);
+    }
 
-    case '+':
-        if (match(lexer, '+')) return make_token(lexer, TOKEN_PLUS_PLUS, start);
-        return make_token(lexer, match(lexer, '=') ? TOKEN_PLUS_EQUAL : TOKEN_PLUS, start);
-    case '-':
-        if (match(lexer, '-')) return make_token(lexer, TOKEN_MINUS_MINUS, start);
-        if (match(lexer, '>')) return make_token(lexer, TOKEN_ARROW, start);
-        return make_token(lexer, match(lexer, '=') ? TOKEN_MINUS_EQUAL : TOKEN_MINUS, start);
-    case '*':
-        return make_token(lexer, match(lexer, '=') ? TOKEN_STAR_EQUAL : TOKEN_STAR, start);
-    case '/':
-        return make_token(lexer, match(lexer, '=') ? TOKEN_SLASH_EQUAL : TOKEN_SLASH, start);
-    case '%':
-        return make_token(lexer, TOKEN_PERCENT, start);
-    case '!':
-        return make_token(lexer, match(lexer, '=') ? TOKEN_NOT_EQUAL : TOKEN_NOT, start);
-    case '=':
-        return make_token(lexer, match(lexer, '=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL, start);
-    case '<':
-        if (match(lexer, '=')) return make_token(lexer, TOKEN_LESS_EQUAL, start);
-        if (match(lexer, '<')) return make_token(lexer, TOKEN_SHIFT_LEFT, start);
-        return make_token(lexer, TOKEN_LESS, start);
+    if (isalpha(c) || c == '_')
+    {
+        return identifier(lexer);
+    }
+
+    if (isdigit(c))
+    {
+        return number(lexer);
+    }
+
+    switch (c)
+    {
+    case '(': return make_token(lexer, TOKEN_LEFT_PAREN, start, 1);
+    case ')': return make_token(lexer, TOKEN_RIGHT_PAREN, start, 1);
+    case '{': return make_token(lexer, TOKEN_LEFT_BRACE, start, 1);
+    case '}': return make_token(lexer, TOKEN_RIGHT_BRACE, start, 1);
+    case '[': return make_token(lexer, TOKEN_LEFT_BRACKET, start, 1);
+    case ']': return make_token(lexer, TOKEN_RIGHT_BRACKET, start, 1);
+    case ',': return make_token(lexer, TOKEN_COMMA, start, 1);
+    case ';': return make_token(lexer, TOKEN_SEMICOLON, start, 1);
+    case ':': return make_token(lexer, TOKEN_COLON, start, 1);
+    case '+': 
+        if (match(lexer, '+')) return make_token(lexer, TOKEN_PLUS_PLUS, start, 2);
+        return make_token(lexer, match(lexer, '=') ? TOKEN_PLUS_EQUAL : TOKEN_PLUS, start, lexer->current - start);
+    case '-': 
+        if (match(lexer, '>')) return make_token(lexer, TOKEN_ARROW, start, 2);
+        if (match(lexer, '-')) return make_token(lexer, TOKEN_MINUS_MINUS, start, 2);
+        return make_token(lexer, match(lexer, '=') ? TOKEN_MINUS_EQUAL : TOKEN_MINUS, start, lexer->current - start);
+    case '*': return make_token(lexer, match(lexer, '=') ? TOKEN_STAR_EQUAL : TOKEN_STAR, start, lexer->current - start);
+    case '/': return make_token(lexer, match(lexer, '=') ? TOKEN_SLASH_EQUAL : TOKEN_SLASH, start, lexer->current - start);
+    case '%': return make_token(lexer, TOKEN_PERCENT, start, 1);
+    case '!': return make_token(lexer, match(lexer, '=') ? TOKEN_NOT_EQUAL : TOKEN_NOT, start, lexer->current - start);
+    case '=': return make_token(lexer, match(lexer, '=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL, start, lexer->current - start);
+    case '<': 
+        if (match(lexer, '<')) return make_token(lexer, TOKEN_SHIFT_LEFT, start, 2);
+        return make_token(lexer, match(lexer, '=') ? TOKEN_LESS_EQUAL : TOKEN_LESS, start, lexer->current - start);
     case '>':
-        if (match(lexer, '=')) return make_token(lexer, TOKEN_GREATER_EQUAL, start);
-        if (match(lexer, '>')) return make_token(lexer, TOKEN_SHIFT_RIGHT, start);
-        return make_token(lexer, TOKEN_GREATER, start);
+        if (match(lexer, '>')) return make_token(lexer, TOKEN_SHIFT_RIGHT, start, 2);
+        return make_token(lexer, match(lexer, '=') ? TOKEN_GREATER_EQUAL : TOKEN_GREATER, start, lexer->current - start);
     case '&':
-        return make_token(lexer, match(lexer, '&') ? TOKEN_AND_AND : TOKEN_AMPERSAND, start);
+        if (match(lexer, '&')) return make_token(lexer, TOKEN_AND_AND, start, 2);
+        return make_token(lexer, TOKEN_AMPERSAND, start, 1);
     case '|':
-        return make_token(lexer, match(lexer, '|') ? TOKEN_OR_OR : TOKEN_PIPE, start);
+        if (match(lexer, '|')) return make_token(lexer, TOKEN_OR_OR, start, 2);
+        return make_token(lexer, TOKEN_PIPE, start, 1);
+    case '^': return make_token(lexer, TOKEN_CARET, start, 1);
+    case '~': return make_token(lexer, TOKEN_TILDE, start, 1);
     case '?':
-        return make_token(lexer, match(lexer, '?') ? TOKEN_QUESTION_QUESTION : TOKEN_QUESTION, start);
+        if (match(lexer, '?')) return make_token(lexer, TOKEN_QUESTION_QUESTION, start, 2);
+        return make_token(lexer, TOKEN_QUESTION, start, 1);
     case '.':
         if (match(lexer, '.'))
         {
-            if (match(lexer, '.')) return make_token(lexer, TOKEN_DOT_DOT_DOT, start);
-            if (match(lexer, '<')) return make_token(lexer, TOKEN_DOT_DOT_LESS, start);
-            lexer->current = start + 1;
+            if (match(lexer, '.')) return make_token(lexer, TOKEN_DOT_DOT_DOT, start, 3);
+            if (match(lexer, '<')) return make_token(lexer, TOKEN_DOT_DOT_LESS, start, 3);
+            return error_token(lexer, ".. operator not supported");
         }
-        return make_token(lexer, TOKEN_DOT, start);
-    case '$': return make_token(lexer, TOKEN_DOLLAR, start);
-    case '"': return scan_string(lexer);
-    case '\'': return scan_character(lexer);
-    case '@': return make_token(lexer, TOKEN_AT, start);
+        return make_token(lexer, TOKEN_DOT, start, 1);
+    case '"': return string(lexer);
+    case '\'': return character(lexer);
     }
 
-    return make_error_token(lexer, "Unexpected character");
+    return error_token(lexer, "Unexpected character");
 }
+
+// Note: Token strings are not duplicated by the lexer
+// They point into the source string which must remain valid
+// If tokens need to outlive the source, the parser should duplicate them

@@ -1,5 +1,5 @@
 #include "runtime/modules/lifecycle/builtin_modules.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
@@ -17,15 +17,26 @@ static struct {
 static BuiltinModule* current_module = NULL;
 
 void builtin_module_register(const char* name, void (*init_func)(void)) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     if (module_registry.count >= module_registry.capacity) {
-        size_t new_capacity = module_registry.capacity == 0 ? 8 : module_registry.capacity * 2;
-        module_registry.modules = realloc(module_registry.modules, 
-                                        new_capacity * sizeof(BuiltinModule));
+        size_t old_capacity = module_registry.capacity;
+        size_t new_capacity = old_capacity == 0 ? 8 : old_capacity * 2;
+        
+        BuiltinModule* new_modules = MEM_NEW_ARRAY(alloc, BuiltinModule, new_capacity);
+        if (!new_modules) return;
+        
+        if (module_registry.modules) {
+            memcpy(new_modules, module_registry.modules, old_capacity * sizeof(BuiltinModule));
+            MEM_FREE(alloc, module_registry.modules, old_capacity * sizeof(BuiltinModule));
+        }
+        
+        module_registry.modules = new_modules;
         module_registry.capacity = new_capacity;
     }
     
     BuiltinModule* module = &module_registry.modules[module_registry.count++];
-    module->name = strdup(name);
+    module->name = MEM_STRDUP(alloc, name);
     module->init_func = init_func;
     module->exports.names = NULL;
     module->exports.functions = NULL;
@@ -42,13 +53,34 @@ void builtin_module_register(const char* name, void (*init_func)(void)) {
 static void register_export(const char* name, NativeFn func) {
     if (!current_module) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     size_t idx = current_module->exports.count++;
-    current_module->exports.names = realloc(current_module->exports.names,
-                                           current_module->exports.count * sizeof(char*));
-    current_module->exports.functions = realloc(current_module->exports.functions,
-                                              current_module->exports.count * sizeof(NativeFn));
     
-    current_module->exports.names[idx] = strdup(name);
+    // Reallocate names array
+    size_t old_size = idx * sizeof(char*);
+    size_t new_size = current_module->exports.count * sizeof(char*);
+    char** new_names = MEM_ALLOC(alloc, new_size);
+    if (new_names) {
+        if (current_module->exports.names) {
+            memcpy(new_names, current_module->exports.names, old_size);
+            MEM_FREE(alloc, current_module->exports.names, old_size);
+        }
+        current_module->exports.names = new_names;
+    }
+    
+    // Reallocate functions array
+    old_size = idx * sizeof(NativeFn);
+    new_size = current_module->exports.count * sizeof(NativeFn);
+    NativeFn* new_functions = MEM_ALLOC(alloc, new_size);
+    if (new_functions) {
+        if (current_module->exports.functions) {
+            memcpy(new_functions, current_module->exports.functions, old_size);
+            MEM_FREE(alloc, current_module->exports.functions, old_size);
+        }
+        current_module->exports.functions = new_functions;
+    }
+    
+    current_module->exports.names[idx] = MEM_STRDUP(alloc, name);
     current_module->exports.functions[idx] = func;
 }
 
@@ -79,10 +111,13 @@ bool builtin_module_get_all_exports(const char* module_name,
             *names = module->exports.names;
             *count = module->exports.count;
             
-            // Create values array
-            *values = malloc(module->exports.count * sizeof(TaggedValue));
-            for (size_t j = 0; j < module->exports.count; j++) {
-                (*values)[j] = NATIVE_VAL(module->exports.functions[j]);
+            // Create values array using module allocator
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+            *values = MEM_NEW_ARRAY(alloc, TaggedValue, module->exports.count);
+            if (*values) {
+                for (size_t j = 0; j < module->exports.count; j++) {
+                    (*values)[j] = NATIVE_VAL(module->exports.functions[j]);
+                }
             }
             return true;
         }
@@ -231,7 +266,9 @@ static TaggedValue string_charAt(int arg_count, TaggedValue* args) {
     }
     
     char result[2] = {str[index], '\0'};
-    return STRING_VAL(strdup(result));
+    // Strings use string allocator
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    return STRING_VAL(MEM_STRDUP(str_alloc, result));
 }
 
 static TaggedValue string_substring(int arg_count, TaggedValue* args) {
@@ -244,7 +281,10 @@ static TaggedValue string_substring(int arg_count, TaggedValue* args) {
     size_t len = strlen(str);
     
     if (start < 0) start = 0;
-    if (start >= (int)len) return STRING_VAL(strdup(""));
+    if (start >= (int)len) {
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRING_VAL(MEM_STRDUP(str_alloc, ""));
+    }
     
     int end = len;
     if (arg_count >= 3 && IS_NUMBER(args[2])) {
@@ -254,9 +294,12 @@ static TaggedValue string_substring(int arg_count, TaggedValue* args) {
     }
     
     int sub_len = end - start;
-    char* result = malloc(sub_len + 1);
-    memcpy(result, str + start, sub_len);
-    result[sub_len] = '\0';
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_ALLOC(str_alloc, sub_len + 1);
+    if (result) {
+        memcpy(result, str + start, sub_len);
+        result[sub_len] = '\0';
+    }
     
     return STRING_VAL(result);
 }
@@ -268,12 +311,15 @@ static TaggedValue string_toUpperCase(int arg_count, TaggedValue* args) {
     
     const char* str = AS_STRING(args[0]);
     size_t len = strlen(str);
-    char* result = malloc(len + 1);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_ALLOC(str_alloc, len + 1);
     
-    for (size_t i = 0; i < len; i++) {
-        result[i] = (str[i] >= 'a' && str[i] <= 'z') ? str[i] - 32 : str[i];
+    if (result) {
+        for (size_t i = 0; i < len; i++) {
+            result[i] = (str[i] >= 'a' && str[i] <= 'z') ? str[i] - 32 : str[i];
+        }
+        result[len] = '\0';
     }
-    result[len] = '\0';
     
     return STRING_VAL(result);
 }
@@ -285,12 +331,15 @@ static TaggedValue string_toLowerCase(int arg_count, TaggedValue* args) {
     
     const char* str = AS_STRING(args[0]);
     size_t len = strlen(str);
-    char* result = malloc(len + 1);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_ALLOC(str_alloc, len + 1);
     
-    for (size_t i = 0; i < len; i++) {
-        result[i] = (str[i] >= 'A' && str[i] <= 'Z') ? str[i] + 32 : str[i];
+    if (result) {
+        for (size_t i = 0; i < len; i++) {
+            result[i] = (str[i] >= 'A' && str[i] <= 'Z') ? str[i] + 32 : str[i];
+        }
+        result[len] = '\0';
     }
-    result[len] = '\0';
     
     return STRING_VAL(result);
 }
@@ -359,7 +408,8 @@ static TaggedValue io_readLine(int arg_count, TaggedValue* args) {
         if (len > 0 && buffer[len-1] == '\n') {
             buffer[len-1] = '\0';
         }
-        return STRING_VAL(strdup(buffer));
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRING_VAL(MEM_STRDUP(str_alloc, buffer));
     }
     
     return NIL_VAL;
@@ -375,4 +425,48 @@ void builtin_modules_init(void) {
     builtin_module_register("string", builtin_string_init);
     builtin_module_register("array", builtin_array_init);
     builtin_module_register("io", builtin_io_init);
+}
+
+// Cleanup function to free module registry
+void builtin_modules_cleanup(void) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
+    // Free all module names and export arrays
+    for (size_t i = 0; i < module_registry.count; i++) {
+        BuiltinModule* module = &module_registry.modules[i];
+        
+        // Free module name
+        if (module->name) {
+            MEM_FREE(alloc, (char*)module->name, strlen(module->name) + 1);
+        }
+        
+        // Free export names
+        for (size_t j = 0; j < module->exports.count; j++) {
+            if (module->exports.names[j]) {
+                MEM_FREE(alloc, (char*)module->exports.names[j], 
+                        strlen(module->exports.names[j]) + 1);
+            }
+        }
+        
+        // Free arrays
+        if (module->exports.names) {
+            MEM_FREE(alloc, module->exports.names, 
+                    module->exports.count * sizeof(char*));
+        }
+        if (module->exports.functions) {
+            MEM_FREE(alloc, module->exports.functions, 
+                    module->exports.count * sizeof(NativeFn));
+        }
+    }
+    
+    // Free module registry
+    if (module_registry.modules) {
+        MEM_FREE(alloc, module_registry.modules, 
+                module_registry.capacity * sizeof(BuiltinModule));
+    }
+    
+    // Reset registry
+    module_registry.modules = NULL;
+    module_registry.count = 0;
+    module_registry.capacity = 0;
 }

@@ -11,7 +11,8 @@
 #include "runtime/packages/package.h"
 #include "runtime/core/vm.h"
 #include "utils/hash_map.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -56,6 +57,8 @@ static bool create_directory(const char* path) {
 
 // Helper: Read file contents
 static char* read_file(const char* path, size_t* size) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     FILE* file = fopen(path, "rb");
     if (!file) return NULL;
     
@@ -63,7 +66,7 @@ static char* read_file(const char* path, size_t* size) {
     *size = ftell(file);
     fseek(file, 0, SEEK_SET);
     
-    char* content = malloc(*size + 1);
+    char* content = MODULES_ALLOC(*size + 1);
     fread(content, 1, *size, file);
     content[*size] = '\0';
     
@@ -73,6 +76,8 @@ static char* read_file(const char* path, size_t* size) {
 
 // Helper: Simple JSON string extraction for bundle metadata
 static char* json_get_string_from_bundle(const char* json, const char* key) {
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     char search_key[256];
     snprintf(search_key, sizeof(search_key), "\"%s\":", key);
     
@@ -105,7 +110,7 @@ static char* json_get_string_from_bundle(const char* json, const char* key) {
     
     // Extract string
     size_t len = end - start;
-    char* result = malloc(len + 1);
+    char* result = STRINGS_ALLOC(len + 1);
     strncpy(result, start, len);
     result[len] = '\0';
     
@@ -118,7 +123,10 @@ void* bundle_builder_create(const BundleOptions* options) {
         return NULL;
     }
     
-    BundleBuilder* builder = calloc(1, sizeof(BundleBuilder));
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    BundleBuilder* builder = MODULES_NEW_ZERO(BundleBuilder);
     builder->options = *options;
     builder->modules = hash_map_create();
     builder->resources = hash_map_create();
@@ -126,12 +134,12 @@ void* bundle_builder_create(const BundleOptions* options) {
     // Initialize metadata
     builder->metadata.type = options->type;
     builder->metadata.created_at = time(NULL);
-    builder->metadata.creator = strdup("SwiftLang Bundle Builder v1.0");
-    builder->metadata.platform = strdup("universal");
-    builder->metadata.min_version = strdup("1.0.0");
+    builder->metadata.creator = STRINGS_STRDUP("SwiftLang Bundle Builder v1.0");
+    builder->metadata.platform = STRINGS_STRDUP("universal");
+    builder->metadata.min_version = STRINGS_STRDUP("1.0.0");
     
     if (options->entry_point) {
-        builder->metadata.entry_point = strdup(options->entry_point);
+        builder->metadata.entry_point = STRINGS_STRDUP(options->entry_point);
     }
     
     // Create temporary directory
@@ -141,7 +149,7 @@ void* bundle_builder_create(const BundleOptions* options) {
         bundle_builder_destroy(builder);
         return NULL;
     }
-    builder->temp_path = strdup(builder->temp_path);
+    builder->temp_path = STRINGS_STRDUP(builder->temp_path);
     
     // Initialize ZIP archive
     memset(&builder->zip, 0, sizeof(builder->zip));
@@ -161,23 +169,31 @@ bool bundle_builder_add_module(void* builder_ptr, const char* module_path, const
         return false;
     }
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Determine bundle path
     const char* final_bundle_path = bundle_path;
+    char* allocated_bundle_path = NULL;
+    
     if (!final_bundle_path) {
         // Extract module name from path
         const char* module_name = strrchr(module_path, '/');
         module_name = module_name ? module_name + 1 : module_path;
         
         // Remove .swiftmodule extension if present
-        char* name_copy = strdup(module_name);
-        char* ext = strstr(name_copy, ".swiftmodule");
+        allocated_bundle_path = STRINGS_STRDUP(module_name);
+        char* ext = strstr(allocated_bundle_path, ".swiftmodule");
         if (ext) *ext = '\0';
         
-        final_bundle_path = name_copy;
+        final_bundle_path = allocated_bundle_path;
     }
     
     // Check if module is already added
     if (hash_map_contains(builder->modules, final_bundle_path)) {
+        if (allocated_bundle_path) {
+            STRINGS_FREE(allocated_bundle_path, strlen(allocated_bundle_path) + 1);
+        }
         return true; // Already added
     }
     
@@ -186,6 +202,9 @@ bool bundle_builder_add_module(void* builder_ptr, const char* module_path, const
     char* module_data = read_file(module_path, &module_size);
     if (!module_data) {
         fprintf(stderr, "Failed to read module: %s\n", module_path);
+        if (allocated_bundle_path) {
+            STRINGS_FREE(allocated_bundle_path, strlen(allocated_bundle_path) + 1);
+        }
         return false;
     }
     
@@ -199,36 +218,55 @@ bool bundle_builder_add_module(void* builder_ptr, const char* module_path, const
     }
     
     if (!mz_zip_writer_add_mem(&builder->zip, zip_path, module_data, module_size, flags)) {
-        free(module_data);
+        MODULES_FREE(module_data, module_size + 1);
+        if (allocated_bundle_path) {
+            STRINGS_FREE(allocated_bundle_path, strlen(allocated_bundle_path) + 1);
+        }
         return false;
     }
     
-    free(module_data);
+    MODULES_FREE(module_data, module_size + 1);
     
     // Track module
-    hash_map_put(builder->modules, final_bundle_path, strdup(module_path));
+    hash_map_put(builder->modules, final_bundle_path, STRINGS_STRDUP(module_path));
     
     // Extract version from module metadata if available
-    char* module_version = strdup("1.0.0"); // default version
+    char* module_version = STRINGS_STRDUP("1.0.0"); // default version
     
     // Try to load module metadata to get version
     ModuleMetadata* mod_metadata = package_load_module_metadata(module_path);
     if (mod_metadata && mod_metadata->version) {
-        free(module_version);
-        module_version = strdup(mod_metadata->version);
+        STRINGS_FREE(module_version, strlen(module_version) + 1);
+        module_version = STRINGS_STRDUP(mod_metadata->version);
         package_free_module_metadata(mod_metadata);
     }
     
     // Update metadata
     size_t new_count = builder->metadata.modules.count + 1;
-    builder->metadata.modules.names = realloc(builder->metadata.modules.names, 
-                                             new_count * sizeof(char*));
-    builder->metadata.modules.versions = realloc(builder->metadata.modules.versions,
-                                                new_count * sizeof(char*));
+    size_t old_capacity = builder->metadata.modules.count;
     
-    builder->metadata.modules.names[builder->metadata.modules.count] = strdup(final_bundle_path);
+    char** new_names = MODULES_NEW_ARRAY(char*, new_count);
+    char** new_versions = MODULES_NEW_ARRAY(char*, new_count);
+    
+    if (builder->metadata.modules.names) {
+        memcpy(new_names, builder->metadata.modules.names, old_capacity * sizeof(char*));
+        MODULES_FREE(builder->metadata.modules.names, old_capacity * sizeof(char*));
+    }
+    if (builder->metadata.modules.versions) {
+        memcpy(new_versions, builder->metadata.modules.versions, old_capacity * sizeof(char*));
+        MODULES_FREE(builder->metadata.modules.versions, old_capacity * sizeof(char*));
+    }
+    
+    builder->metadata.modules.names = new_names;
+    builder->metadata.modules.versions = new_versions;
+    
+    builder->metadata.modules.names[builder->metadata.modules.count] = STRINGS_STRDUP(final_bundle_path);
     builder->metadata.modules.versions[builder->metadata.modules.count] = module_version;
     builder->metadata.modules.count = new_count;
+    
+    if (allocated_bundle_path) {
+        STRINGS_FREE(allocated_bundle_path, strlen(allocated_bundle_path) + 1);
+    }
     
     return true;
 }
@@ -240,6 +278,7 @@ int bundle_builder_add_dependencies(void* builder_ptr, const char* module_path, 
         return 0;
     }
     
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     int added = 0;
     
     // Load module metadata to find dependencies
@@ -270,7 +309,7 @@ int bundle_builder_add_dependencies(void* builder_ptr, const char* module_path, 
             for (int j = 0; locations[j]; j++) {
                 snprintf(dep_path, sizeof(dep_path), locations[j], dep_name, dep_name);
                 if (access(dep_path, F_OK) == 0) {
-                    resolved_path = strdup(dep_path);
+                    resolved_path = STRINGS_STRDUP(dep_path);
                     break;
                 }
             }
@@ -285,7 +324,7 @@ int bundle_builder_add_dependencies(void* builder_ptr, const char* module_path, 
                     added += bundle_builder_add_dependencies(builder, resolved_path, true);
                 }
             }
-            free(resolved_path);
+            STRINGS_FREE(resolved_path, strlen(resolved_path) + 1);
         } else {
             fprintf(stderr, "Warning: Could not resolve dependency '%s' version '%s'\n", 
                     dep_name, dep_version ? dep_version : "any");
@@ -303,6 +342,9 @@ bool bundle_builder_add_resource(void* builder_ptr, const char* resource_path, c
         return false;
     }
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Read resource file
     size_t resource_size;
     char* resource_data = read_file(resource_path, &resource_size);
@@ -316,14 +358,14 @@ bool bundle_builder_add_resource(void* builder_ptr, const char* resource_path, c
     
     if (!mz_zip_writer_add_mem(&builder->zip, zip_path, resource_data, resource_size, 
                                builder->options.compress ? MZ_DEFAULT_COMPRESSION : 0)) {
-        free(resource_data);
+        MODULES_FREE(resource_data, resource_size + 1);
         return false;
     }
     
-    free(resource_data);
+    MODULES_FREE(resource_data, resource_size + 1);
     
     // Track resource
-    hash_map_put(builder->resources, bundle_path, strdup(resource_path));
+    hash_map_put(builder->resources, bundle_path, STRINGS_STRDUP(resource_path));
     
     return true;
 }
@@ -335,18 +377,26 @@ bool bundle_builder_set_metadata(void* builder_ptr, const BundleMetadata* metada
         return false;
     }
     
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Copy provided metadata fields
     if (metadata->name) {
-        free(builder->metadata.name);
-        builder->metadata.name = strdup(metadata->name);
+        if (builder->metadata.name) {
+            STRINGS_FREE(builder->metadata.name, strlen(builder->metadata.name) + 1);
+        }
+        builder->metadata.name = STRINGS_STRDUP(metadata->name);
     }
     if (metadata->version) {
-        free(builder->metadata.version);
-        builder->metadata.version = strdup(metadata->version);
+        if (builder->metadata.version) {
+            STRINGS_FREE(builder->metadata.version, strlen(builder->metadata.version) + 1);
+        }
+        builder->metadata.version = STRINGS_STRDUP(metadata->version);
     }
     if (metadata->description) {
-        free(builder->metadata.description);
-        builder->metadata.description = strdup(metadata->description);
+        if (builder->metadata.description) {
+            STRINGS_FREE(builder->metadata.description, strlen(builder->metadata.description) + 1);
+        }
+        builder->metadata.description = STRINGS_STRDUP(metadata->description);
     }
     
     return true;
@@ -438,6 +488,9 @@ void bundle_builder_destroy(void* builder_ptr) {
     BundleBuilder* builder = (BundleBuilder*)builder_ptr;
     if (!builder) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     if (builder->initialized) {
         mz_zip_writer_end(&builder->zip);
     }
@@ -447,38 +500,59 @@ void bundle_builder_destroy(void* builder_ptr) {
         char cmd[256];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", builder->temp_path);
         system(cmd);
-        free(builder->temp_path);
+        STRINGS_FREE(builder->temp_path, strlen(builder->temp_path) + 1);
     }
     
     // Free metadata
-    free(builder->metadata.name);
-    free(builder->metadata.version);
-    free(builder->metadata.description);
-    free(builder->metadata.entry_point);
-    free(builder->metadata.creator);
-    free(builder->metadata.platform);
-    free(builder->metadata.min_version);
+    if (builder->metadata.name) {
+        STRINGS_FREE(builder->metadata.name, strlen(builder->metadata.name) + 1);
+    }
+    if (builder->metadata.version) {
+        STRINGS_FREE(builder->metadata.version, strlen(builder->metadata.version) + 1);
+    }
+    if (builder->metadata.description) {
+        STRINGS_FREE(builder->metadata.description, strlen(builder->metadata.description) + 1);
+    }
+    if (builder->metadata.entry_point) {
+        STRINGS_FREE(builder->metadata.entry_point, strlen(builder->metadata.entry_point) + 1);
+    }
+    if (builder->metadata.creator) {
+        STRINGS_FREE(builder->metadata.creator, strlen(builder->metadata.creator) + 1);
+    }
+    if (builder->metadata.platform) {
+        STRINGS_FREE(builder->metadata.platform, strlen(builder->metadata.platform) + 1);
+    }
+    if (builder->metadata.min_version) {
+        STRINGS_FREE(builder->metadata.min_version, strlen(builder->metadata.min_version) + 1);
+    }
     
     for (size_t i = 0; i < builder->metadata.modules.count; i++) {
-        free(builder->metadata.modules.names[i]);
-        free(builder->metadata.modules.versions[i]);
+        STRINGS_FREE(builder->metadata.modules.names[i], strlen(builder->metadata.modules.names[i]) + 1);
+        STRINGS_FREE(builder->metadata.modules.versions[i], strlen(builder->metadata.modules.versions[i]) + 1);
     }
-    free(builder->metadata.modules.names);
-    free(builder->metadata.modules.versions);
+    if (builder->metadata.modules.names) {
+        MODULES_FREE(builder->metadata.modules.names, builder->metadata.modules.count * sizeof(char*));
+    }
+    if (builder->metadata.modules.versions) {
+        MODULES_FREE(builder->metadata.modules.versions, builder->metadata.modules.count * sizeof(char*));
+    }
     
     // Free hash maps
     hash_map_destroy(builder->modules);
     hash_map_destroy(builder->resources);
     
-    free(builder);
+    MODULES_FREE(builder, sizeof(BundleBuilder));
 }
 
 // Open bundle for reading
 void* bundle_open(const char* bundle_path) {
     if (!bundle_path) return NULL;
     
-    Bundle* bundle = calloc(1, sizeof(Bundle));
-    bundle->path = strdup(bundle_path);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    Bundle* bundle = MODULES_NEW_ZERO(Bundle);
+    bundle->path = STRINGS_STRDUP(bundle_path);
     
     // Open ZIP archive
     memset(&bundle->zip, 0, sizeof(bundle->zip));
@@ -499,12 +573,12 @@ void* bundle_open(const char* bundle_path) {
     // Parse metadata from JSON
     bundle->metadata.name = json_get_string_from_bundle(metadata_json, "name");
     if (!bundle->metadata.name) {
-        bundle->metadata.name = strdup("unnamed_bundle");
+        bundle->metadata.name = STRINGS_STRDUP("unnamed_bundle");
     }
     
     bundle->metadata.version = json_get_string_from_bundle(metadata_json, "version");
     if (!bundle->metadata.version) {
-        bundle->metadata.version = strdup("1.0.0");
+        bundle->metadata.version = STRINGS_STRDUP("1.0.0");
     }
     
     // Parse bundle type
@@ -517,7 +591,7 @@ void* bundle_open(const char* bundle_path) {
         } else {
             bundle->metadata.type = BUNDLE_TYPE_APPLICATION; // default
         }
-        free(type_str);
+        STRINGS_FREE(type_str, strlen(type_str) + 1);
     } else {
         bundle->metadata.type = BUNDLE_TYPE_APPLICATION;
     }
@@ -525,13 +599,13 @@ void* bundle_open(const char* bundle_path) {
     // Parse entry point
     bundle->metadata.entry_point = json_get_string_from_bundle(metadata_json, "entry_point");
     if (!bundle->metadata.entry_point) {
-        bundle->metadata.entry_point = strdup("main");
+        bundle->metadata.entry_point = STRINGS_STRDUP("main");
     }
     
     // Parse main module
     bundle->metadata.main_module = json_get_string_from_bundle(metadata_json, "main_module");
     
-    free(metadata_json);
+    mz_free(metadata_json);
     return bundle;
 }
 
@@ -547,6 +621,8 @@ Module* bundle_load_module(void* bundle_ptr, const char* module_name, ModuleLoad
     if (!bundle || !module_name || !loader) {
         return NULL;
     }
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     
     // Module caching is handled by ModuleLoader
     // Check if already loaded
@@ -572,13 +648,13 @@ Module* bundle_load_module(void* bundle_ptr, const char* module_name, ModuleLoad
     
     FILE* temp_file = fopen(temp_path, "wb");
     if (!temp_file) {
-        free(module_data);
+        mz_free(module_data);
         return NULL;
     }
     
     fwrite(module_data, 1, module_size, temp_file);
     fclose(temp_file);
-    free(module_data);
+    mz_free(module_data);
     
     // Load module from temporary file
     Module* module = module_load(loader, temp_path, false);
@@ -596,6 +672,9 @@ char** bundle_list_modules(void* bundle_ptr, size_t* count) {
     if (!bundle || !count) {
         return NULL;
     }
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     // Count modules by looking for modules/ prefix
     *count = 0;
@@ -615,7 +694,7 @@ char** bundle_list_modules(void* bundle_ptr, size_t* count) {
     }
     
     // Allocate array
-    char** modules = malloc(*count * sizeof(char*));
+    char** modules = MODULES_NEW_ARRAY(char*, *count);
     size_t idx = 0;
     
     // Extract module names
@@ -629,7 +708,7 @@ char** bundle_list_modules(void* bundle_ptr, size_t* count) {
             char* ext = strstr(name_start, ".swiftmodule");
             if (ext) {
                 size_t name_len = ext - name_start;
-                modules[idx] = malloc(name_len + 1);
+                modules[idx] = STRINGS_ALLOC(name_len + 1);
                 strncpy(modules[idx], name_start, name_len);
                 modules[idx][name_len] = '\0';
                 idx++;
@@ -645,21 +724,42 @@ void bundle_close(void* bundle_ptr) {
     Bundle* bundle = (Bundle*)bundle_ptr;
     if (!bundle) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     mz_zip_reader_end(&bundle->zip);
     
     // Module cache is managed by ModuleLoader
     
-    free(bundle->path);
-    free(bundle->metadata.name);
-    free(bundle->metadata.version);
-    free(bundle->metadata.description);
-    free(bundle->metadata.entry_point);
-    free(bundle->metadata.main_module);
-    free(bundle->metadata.creator);
-    free(bundle->metadata.platform);
-    free(bundle->metadata.min_version);
+    if (bundle->path) {
+        STRINGS_FREE(bundle->path, strlen(bundle->path) + 1);
+    }
+    if (bundle->metadata.name) {
+        STRINGS_FREE(bundle->metadata.name, strlen(bundle->metadata.name) + 1);
+    }
+    if (bundle->metadata.version) {
+        STRINGS_FREE(bundle->metadata.version, strlen(bundle->metadata.version) + 1);
+    }
+    if (bundle->metadata.description) {
+        STRINGS_FREE(bundle->metadata.description, strlen(bundle->metadata.description) + 1);
+    }
+    if (bundle->metadata.entry_point) {
+        STRINGS_FREE(bundle->metadata.entry_point, strlen(bundle->metadata.entry_point) + 1);
+    }
+    if (bundle->metadata.main_module) {
+        STRINGS_FREE(bundle->metadata.main_module, strlen(bundle->metadata.main_module) + 1);
+    }
+    if (bundle->metadata.creator) {
+        STRINGS_FREE(bundle->metadata.creator, strlen(bundle->metadata.creator) + 1);
+    }
+    if (bundle->metadata.platform) {
+        STRINGS_FREE(bundle->metadata.platform, strlen(bundle->metadata.platform) + 1);
+    }
+    if (bundle->metadata.min_version) {
+        STRINGS_FREE(bundle->metadata.min_version, strlen(bundle->metadata.min_version) + 1);
+    }
     
-    free(bundle);
+    MODULES_FREE(bundle, sizeof(Bundle));
 }
 
 // Execute bundle
@@ -780,8 +880,12 @@ bool bundle_verify(const char* bundle_path) {
 char* bundle_info_json(const char* bundle_path) {
     void* bundle = bundle_open(bundle_path);
     if (!bundle) {
-        return strdup("{\"error\": \"Failed to open bundle\"}");
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRINGS_STRDUP("{\"error\": \"Failed to open bundle\"}");
     }
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     const BundleMetadata* metadata = bundle_get_metadata(bundle);
     
@@ -791,7 +895,7 @@ char* bundle_info_json(const char* bundle_path) {
     
     // Build JSON
     size_t json_size = 4096;
-    char* json = malloc(json_size);
+    char* json = MODULES_ALLOC(json_size);
     size_t offset = 0;
     
     offset += snprintf(json + offset, json_size - offset,
@@ -812,12 +916,18 @@ char* bundle_info_json(const char* bundle_path) {
             offset += snprintf(json + offset, json_size - offset, ", ");
         }
         offset += snprintf(json + offset, json_size - offset, "\"%s\"", modules[i]);
-        free(modules[i]);
+        STRINGS_FREE(modules[i], strlen(modules[i]) + 1);
     }
-    free(modules);
+    if (modules) {
+        MODULES_FREE(modules, module_count * sizeof(char*));
+    }
     
     offset += snprintf(json + offset, json_size - offset, "]\n}\n");
     
     bundle_close(bundle);
-    return json;
+    
+    // Transfer ownership to string allocator
+    char* result = STRINGS_STRDUP(json);
+    MODULES_FREE(json, json_size);
+    return result;
 }

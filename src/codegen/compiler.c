@@ -2,9 +2,8 @@
 #include "semantic/visitor.h"
 #include "ast/ast.h"
 #include "runtime/core/vm.h"
+#include "utils/allocators.h"
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <string.h>
 
 static Compiler* current = NULL;
@@ -13,135 +12,11 @@ static Compiler* current = NULL;
 static void emit_byte(uint8_t byte);
 static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt);
 static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt);
-
-static void begin_scope(void) {
-    current->scope_depth++;
-}
-
-static void end_scope(void) {
-    current->scope_depth--;
-    
-    // Pop locals that are going out of scope
-    while (current->locals.count > 0 &&
-           current->locals.depths[current->locals.count - 1] > current->scope_depth) {
-        emit_byte(OP_POP);
-
-        current->locals.count--;
-    }
-}
-
-static void mark_initialized(void) {
-    if (current->scope_depth == 0) return; // Globals are implicitly initialized
-    current->locals.depths[current->locals.count - 1] = current->scope_depth;
-}
-
-static void add_local(Compiler* compiler, const char* name) {
-    if (compiler->locals.count >= UINT8_MAX) {
-        fprintf(stderr, "Too many local variables in function.\n");
-        return;
-    }
-    
-    // Grow arrays if needed
-    if (compiler->locals.count >= compiler->locals.capacity) {
-        size_t old_capacity = compiler->locals.capacity;
-        compiler->locals.capacity = old_capacity < 8 ? 8 : old_capacity * 2;
-        compiler->locals.names = realloc(compiler->locals.names,
-                                        sizeof(char*) * compiler->locals.capacity);
-        compiler->locals.depths = realloc(compiler->locals.depths,
-                                         sizeof(int) * compiler->locals.capacity);
-    }
-    
-    compiler->locals.names[compiler->locals.count] = strdup(name);
-    compiler->locals.depths[compiler->locals.count] = compiler->scope_depth;
-    compiler->locals.count++;
-}
-
-static int resolve_local(Compiler* compiler, const char* name) {
-    for (int i = compiler->locals.count - 1; i >= 0; i--) {
-        if (strcmp(name, compiler->locals.names[i]) == 0) {
-            if (compiler->locals.depths[i] == -1) {
-                // Error: Can't read local variable in its own initializer
-                return -1;
-            }
-            return i;
-        }
-    }
-    return -1;
-}
-
-static int add_upvalue(Compiler* compiler, uint8_t index, bool is_local) {
-    // Upvalues allow closures to capture variables from enclosing scopes
-    // Each upvalue tracks either:
-    // - A local variable from the immediately enclosing function (is_local = true)
-    // - An upvalue from the enclosing function (is_local = false)
-    
-    int upvalue_count = compiler->function->upvalue_count;
-    
-    // Check if we already have this upvalue (avoid duplicates)
-    for (int i = 0; i < upvalue_count; i++) {
-        CompilerUpvalue* upvalue = &compiler->upvalues.values[i];
-        if (upvalue->index == index && upvalue->is_local == is_local) {
-            return i;
-        }
-    }
-    
-    // Add new upvalue
-    if (upvalue_count >= UINT8_MAX) {
-        return -1; // Too many closure variables
-    }
-    
-    // Grow array if needed
-    if (compiler->upvalues.count >= compiler->upvalues.capacity) {
-        size_t old_capacity = compiler->upvalues.capacity;
-        compiler->upvalues.capacity = old_capacity < 8 ? 8 : old_capacity * 2;
-        compiler->upvalues.values = realloc(compiler->upvalues.values,
-                                          sizeof(CompilerUpvalue) * compiler->upvalues.capacity);
-    }
-    
-    // Store upvalue metadata
-    compiler->upvalues.values[upvalue_count].is_local = is_local;
-    compiler->upvalues.values[upvalue_count].index = index;
-    compiler->upvalues.count++;
-    return compiler->function->upvalue_count++;
-}
-
-static int resolve_upvalue(Compiler* compiler, const char* name) {
-    // Resolve variable capture for closures - walks up the compiler chain
-    // This implements lexical scoping for nested functions
-    
-    if (compiler->enclosing == NULL) return -1;  // No enclosing scope
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] resolve_upvalue: looking for '%s' in enclosing scope\n", name);
-    }
-    
-    // First check if it's a local in the immediately enclosing function
-    int local = resolve_local(compiler->enclosing, name);
-    if (local != -1) {
-        // Found as local in parent - capture it directly
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG]   Found '%s' as local %d in parent, creating upvalue\n", name, local);
-        }
-        return add_upvalue(compiler, (uint8_t)local, true);
-    }
-    
-    // Not a local in parent - check if parent has it as an upvalue
-    // This handles deeply nested closures through upvalue chains
-    int upvalue = resolve_upvalue(compiler->enclosing, name);
-    if (upvalue != -1) {
-        // Found as upvalue in parent - capture the upvalue
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG]   Found '%s' as upvalue %d in parent, chaining upvalue\n", name, upvalue);
-        }
-        return add_upvalue(compiler, (uint8_t)upvalue, false);
-    }
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG]   '%s' not found in any enclosing scope\n", name);
-    }
-    
-    return -1;  // Variable not found in any enclosing scope
-}
+static void init_compiler(Compiler* compiler, CompilerFunctionType type);
+static void free_compiler(Compiler* compiler);
+static void init_loop(Loop* loop);
+static void free_loop(Loop* loop);
+static void add_break_jump(Loop* loop, int jump);
 
 static void emit_byte(uint8_t byte) {
     chunk_write(current->current_chunk, byte, 1);
@@ -189,10 +64,6 @@ static void emit_loop(int loop_start) {
 
 static void emit_constant(TaggedValue value) {
     int constant = chunk_add_constant(current->current_chunk, value);
-    // if (getenv("SWIFTLANG_DEBUG") && value.type == VAL_STRING) {
-    //     fprintf(stderr, "[DEBUG] emit_constant: added string '%s' at index %d to chunk %p\n",
-    //             AS_STRING(value), constant, (void*)current->current_chunk);
-    // }
     if (constant < 256) {
         emit_bytes(OP_CONSTANT, constant);
     } else {
@@ -203,7 +74,194 @@ static void emit_constant(TaggedValue value) {
     }
 }
 
-// Visitor functions for compiling expressions
+static uint8_t make_constant(TaggedValue value) {
+    int constant = chunk_add_constant(current->current_chunk, value);
+    if (constant > UINT8_MAX) {
+        // TODO: Error handling
+        return 0;
+    }
+    return (uint8_t)constant;
+}
+
+static void begin_scope(void) {
+    current->scope_depth++;
+}
+
+static void end_scope(void) {
+    current->scope_depth--;
+    
+    // Pop locals that are going out of scope
+    while (current->locals.count > 0 &&
+           current->locals.depths[current->locals.count - 1] > current->scope_depth) {
+        emit_byte(OP_POP);
+
+        // Free the local name using compiler allocator
+        if (current->locals.names[current->locals.count - 1]) {
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+            size_t len = strlen(current->locals.names[current->locals.count - 1]) + 1;
+            MEM_FREE(alloc, current->locals.names[current->locals.count - 1], len);
+        }
+        current->locals.count--;
+    }
+}
+
+static void mark_initialized(void) {
+    if (current->scope_depth == 0) return; // Globals are implicitly initialized
+    current->locals.depths[current->locals.count - 1] = current->scope_depth;
+}
+
+static void add_local(Compiler* compiler, const char* name) {
+    if (compiler->locals.count >= UINT8_MAX) {
+        fprintf(stderr, "Too many local variables in function.\n");
+        return;
+    }
+    
+    // Grow arrays if needed
+    if (compiler->locals.count >= compiler->locals.capacity) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+        size_t old_capacity = compiler->locals.capacity;
+        compiler->locals.capacity = old_capacity < 8 ? 8 : old_capacity * 2;
+        
+        // Reallocate names array
+        char** new_names = MEM_NEW_ARRAY(alloc, char*, compiler->locals.capacity);
+        if (compiler->locals.names && old_capacity > 0) {
+            memcpy(new_names, compiler->locals.names, sizeof(char*) * old_capacity);
+            MEM_FREE(alloc, compiler->locals.names, sizeof(char*) * old_capacity);
+        }
+        compiler->locals.names = new_names;
+        
+        // Reallocate depths array
+        int* new_depths = MEM_NEW_ARRAY(alloc, int, compiler->locals.capacity);
+        if (compiler->locals.depths && old_capacity > 0) {
+            memcpy(new_depths, compiler->locals.depths, sizeof(int) * old_capacity);
+            MEM_FREE(alloc, compiler->locals.depths, sizeof(int) * old_capacity);
+        }
+        compiler->locals.depths = new_depths;
+    }
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_BYTECODE);
+    compiler->locals.names[compiler->locals.count] = MEM_STRDUP(alloc, name);
+    compiler->locals.depths[compiler->locals.count] = -1; // Mark as uninitialized
+    compiler->locals.count++;
+}
+
+static int resolve_local(Compiler* compiler, const char* name) {
+    for (int i = compiler->locals.count - 1; i >= 0; i--) {
+        if (strcmp(name, compiler->locals.names[i]) == 0) {
+            if (compiler->locals.depths[i] == -1) {
+                // Error: Can't read local variable in its own initializer
+                return -1;
+            }
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int add_upvalue(Compiler* compiler, uint8_t index, bool is_local) {
+    // Upvalues allow closures to capture variables from enclosing scopes
+    // Each upvalue tracks either:
+    // - A local variable from the immediately enclosing function (is_local = true)
+    // - An upvalue from the enclosing function (is_local = false)
+    
+    int upvalue_count = compiler->function->upvalue_count;
+    
+    // Check if we already have this upvalue (avoid duplicates)
+    for (int i = 0; i < upvalue_count; i++) {
+        CompilerUpvalue* upvalue = &compiler->upvalues.values[i];
+        if (upvalue->index == index && upvalue->is_local == is_local) {
+            return i;
+        }
+    }
+    
+    // Add new upvalue
+    if (upvalue_count >= UINT8_MAX) {
+        return -1; // Too many closure variables
+    }
+    
+    // Grow array if needed
+    if (compiler->upvalues.count >= compiler->upvalues.capacity) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+        size_t old_capacity = compiler->upvalues.capacity;
+        compiler->upvalues.capacity = old_capacity < 8 ? 8 : old_capacity * 2;
+        
+        CompilerUpvalue* new_values = MEM_NEW_ARRAY(alloc, CompilerUpvalue, compiler->upvalues.capacity);
+        if (compiler->upvalues.values && old_capacity > 0) {
+            memcpy(new_values, compiler->upvalues.values, sizeof(CompilerUpvalue) * old_capacity);
+            MEM_FREE(alloc, compiler->upvalues.values, sizeof(CompilerUpvalue) * old_capacity);
+        }
+        compiler->upvalues.values = new_values;
+    }
+    
+    compiler->upvalues.values[upvalue_count].is_local = is_local;
+    compiler->upvalues.values[upvalue_count].index = index;
+    compiler->upvalues.count++;
+    
+    return compiler->function->upvalue_count++;
+}
+
+static int resolve_upvalue(Compiler* compiler, const char* name) {
+    if (compiler->enclosing == NULL) return -1;
+    
+    // Check if it's a local in the enclosing function
+    int local = resolve_local(compiler->enclosing, name);
+    if (local != -1) {
+        return add_upvalue(compiler, (uint8_t)local, true);
+    }
+    
+    // Check if it's an upvalue in the enclosing function
+    int upvalue = resolve_upvalue(compiler->enclosing, name);
+    if (upvalue != -1) {
+        return add_upvalue(compiler, (uint8_t)upvalue, false);
+    }
+    
+    return -1;
+}
+
+// String creation helpers using VM allocator (strings are runtime objects)
+static TaggedValue create_string_value(const char* str) {
+    // Strings in the VM use the VM allocator, not compiler allocator
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
+    char* vm_str = MEM_STRDUP(vm_alloc, str);
+    return (TaggedValue){.type = VAL_STRING, .as.string = vm_str};
+}
+
+// Loop tracking with allocator
+static void init_loop(Loop* loop) {
+    loop->enclosing = current->inner_most_loop;
+    loop->start = current->current_chunk->count;
+    loop->scope_depth = current->scope_depth;
+    loop->break_count = 0;
+    loop->break_capacity = 4;
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+    loop->break_jumps = MEM_NEW_ARRAY(alloc, int, loop->break_capacity);
+}
+
+static void free_loop(Loop* loop) {
+    if (loop->break_jumps) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+        MEM_FREE(alloc, loop->break_jumps, sizeof(int) * loop->break_capacity);
+        loop->break_jumps = NULL;
+    }
+}
+
+static void add_break_jump(Loop* loop, int jump) {
+    if (loop->break_count >= loop->break_capacity) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+        size_t old_capacity = loop->break_capacity;
+        loop->break_capacity *= 2;
+        
+        int* new_jumps = MEM_NEW_ARRAY(alloc, int, loop->break_capacity);
+        memcpy(new_jumps, loop->break_jumps, sizeof(int) * old_capacity);
+        MEM_FREE(alloc, loop->break_jumps, sizeof(int) * old_capacity);
+        loop->break_jumps = new_jumps;
+    }
+    
+    loop->break_jumps[loop->break_count++] = jump;
+}
+
+// Compilation functions for expressions
 static void* compile_literal_expr(ASTVisitor* visitor, Expr* expr) {
     (void)visitor;  // Unused parameter
     LiteralExpr* lit = &expr->literal;
@@ -226,7 +284,7 @@ static void* compile_literal_expr(ASTVisitor* visitor, Expr* expr) {
             break;
         }
         case LITERAL_STRING: {
-            TaggedValue value = {.type = VAL_STRING, .as.string = strdup(lit->value.string.value)};
+            TaggedValue value = create_string_value(lit->value.string.value);
             emit_constant(value);
             break;
         }
@@ -296,20 +354,11 @@ static void* compile_variable_expr(ASTVisitor* visitor, Expr* expr) {
     (void)visitor;  // Unused parameter
     VariableExpr* var = &expr->variable;
     
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] compile_variable_expr: '%s'\n", var->name);
-        if (current->type == FUNC_TYPE_FUNCTION && current->enclosing) {
-            fprintf(stderr, "[DEBUG]   Inside closure/function: %s\n", 
-                    current->function ? current->function->name : "<anonymous>");
-        }
-    }
-    
     // Special handling for 'this' in extension methods
     if (strcmp(var->name, "this") == 0 && current->function && 
         strstr(current->function->name, "_ext_") != NULL) {
         // In extension methods, 'this' is always the first local (slot 1)
         // Slot 0 contains the function itself
-        fprintf(stderr, "[DEBUG] Compiling 'this' in extension method %s\n", current->function->name);
         emit_bytes(OP_GET_LOCAL, 1);
         return NULL;
     }
@@ -317,10 +366,6 @@ static void* compile_variable_expr(ASTVisitor* visitor, Expr* expr) {
     // Check if it's a local variable
     int local = resolve_local(current, var->name);
     if (local != -1) {
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG]   Found as local at slot %d\n", local);
-            fprintf(stderr, "[DEBUG]   Emitting: GET_LOCAL %d\n", local);
-        }
         emit_bytes(OP_GET_LOCAL, (uint8_t)local);
         return NULL;
     }
@@ -328,21 +373,13 @@ static void* compile_variable_expr(ASTVisitor* visitor, Expr* expr) {
     // Check if it's an upvalue
     int upvalue = resolve_upvalue(current, var->name);
     if (upvalue != -1) {
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG]   Found as upvalue at index %d\n", upvalue);
-            fprintf(stderr, "[DEBUG]   Emitting: GET_UPVALUE %d\n", upvalue);
-        }
         emit_bytes(OP_GET_UPVALUE, (uint8_t)upvalue);
         return NULL;
     }
     
     // Must be global
     int name_constant = chunk_add_constant(current->current_chunk, 
-        (TaggedValue){.type = VAL_STRING, .as.string = strdup(var->name)});
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG]   Not found locally, treating as global\n");
-        fprintf(stderr, "[DEBUG]   Emitting: GET_GLOBAL %d\n", name_constant);
-    }
+        create_string_value(var->name));
     emit_bytes(OP_GET_GLOBAL, name_constant);
     
     return NULL;
@@ -370,7 +407,7 @@ static void* compile_assignment_expr(ASTVisitor* visitor, Expr* expr) {
             } else {
                 // Must be global
                 int name_constant = chunk_add_constant(current->current_chunk,
-                    (TaggedValue){.type = VAL_STRING, .as.string = strdup(var->name)});
+                    create_string_value(var->name));
                 emit_bytes(OP_SET_GLOBAL, name_constant);
             }
         }
@@ -397,7 +434,7 @@ static void* compile_assignment_expr(ASTVisitor* visitor, Expr* expr) {
         ast_accept_expr(member->object, visitor);
         
         // Push property name
-        TaggedValue prop = STRING_VAL(strdup(member->property));
+        TaggedValue prop = create_string_value(member->property);
         emit_constant(prop);
         
         // Compile value
@@ -438,7 +475,7 @@ static void* compile_object_literal_expr(ASTVisitor* visitor, Expr* expr) {
         emit_byte(OP_DUP);
         
         // Push key
-        TaggedValue key_val = STRING_VAL(strdup(obj->keys[i]));
+        TaggedValue key_val = create_string_value(obj->keys[i]);
         emit_constant(key_val);
         
         // Compile value
@@ -455,59 +492,21 @@ static void* compile_object_literal_expr(ASTVisitor* visitor, Expr* expr) {
 static void* compile_closure_expr(ASTVisitor* visitor, Expr* expr) {
     ClosureExpr* closure = &expr->closure;
     
-    // Closures are compiled as separate functions with captured variables
-    // This creates a new compiler context for the closure body
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "\n[DEBUG] === COMPILING CLOSURE ===\n");
-        fprintf(stderr, "[DEBUG] Parameter count: %zu\n", closure->parameter_count);
-    }
-    
     // Create a new compiler for the closure
     Compiler closure_compiler;
-    closure_compiler.enclosing = current;  // Link to parent for variable capture
-    closure_compiler.type = FUNC_TYPE_FUNCTION;
-    closure_compiler.function = function_create("<closure>", closure->parameter_count);
-    closure_compiler.scope_depth = 0;
-    closure_compiler.locals.count = 0;
-    closure_compiler.locals.capacity = 0;
-    closure_compiler.locals.names = NULL;
-    closure_compiler.locals.depths = NULL;
-    closure_compiler.upvalues.count = 0;
-    closure_compiler.upvalues.capacity = 0;
-    closure_compiler.upvalues.values = NULL;
-    closure_compiler.inner_most_loop = NULL;
-    
-    // Set the function's chunk for bytecode emission
-    closure_compiler.function->chunk = (Chunk){0};
-    chunk_init(&closure_compiler.function->chunk);
-    closure_compiler.current_chunk = &closure_compiler.function->chunk;
-    
-    // if (getenv("SWIFTLANG_DEBUG")) {
-    //     fprintf(stderr, "[DEBUG] compile_closure: function=%p, chunk=%p, current_chunk=%p\n",
-    //             (void*)closure_compiler.function, 
-    //             (void*)&closure_compiler.function->chunk,
-    //             (void*)closure_compiler.current_chunk);
-    // }
+    init_compiler(&closure_compiler, FUNC_TYPE_FUNCTION);
+    closure_compiler.enclosing = current;
+    closure_compiler.function->name = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_BYTECODE), "<closure>");
+    closure_compiler.function->arity = closure->parameter_count;
     
     // Switch to the closure compiler for compiling the body
     Compiler* previous = current;
     current = &closure_compiler;
     
-    // Reserve slot 0 for 'self' (the closure itself) - VM convention
-    add_local(&closure_compiler, "");
-    
     // Add parameters as local variables starting at slot 1
     for (size_t i = 0; i < closure->parameter_count; i++) {
         add_local(&closure_compiler, closure->parameter_names[i]);
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG] Added parameter '%s' at local slot %zu\n", 
-                    closure->parameter_names[i], i + 1);
-        }
-    }
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] Compiling closure body...\n");
+        mark_initialized();
     }
     
     // Check if this is a single expression that should have implicit return
@@ -543,70 +542,41 @@ static void* compile_closure_expr(ASTVisitor* visitor, Expr* expr) {
     // Switch back to the enclosing compiler
     current = previous;
     
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] Closure bytecode generated (%zu bytes):\n", 
-                closure_compiler.function->chunk.count);
-        for (size_t i = 0; i < closure_compiler.function->chunk.count; i++) {
-            uint8_t opcode = closure_compiler.function->chunk.code[i];
-            fprintf(stderr, "[DEBUG]   [%3zu] %02x", i, opcode);
-            
-            // Print opcode name
-            switch (opcode) {
-                case OP_GET_LOCAL: fprintf(stderr, " GET_LOCAL"); break;
-                case OP_GET_UPVALUE: fprintf(stderr, " GET_UPVALUE"); break;
-                case OP_GET_PROPERTY: fprintf(stderr, " GET_PROPERTY"); break;
-                case OP_CONSTANT: fprintf(stderr, " CONSTANT"); break;
-                case OP_RETURN: fprintf(stderr, " RETURN"); break;
-                case OP_NIL: fprintf(stderr, " NIL"); break;
-                case OP_CALL: fprintf(stderr, " CALL"); break;
-                default: fprintf(stderr, " ???"); break;
-            }
-            fprintf(stderr, "\n");
-        }
-        fprintf(stderr, "[DEBUG] Closure has %d upvalues\n", closure_compiler.function->upvalue_count);
-    }
-    
     // Add the function as a constant
     TaggedValue func_val = {.type = VAL_FUNCTION, .as.function = closure_compiler.function};
     int constant = chunk_add_constant(current->current_chunk, func_val);
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] Added closure function as constant at index %d\n", constant);
-    }
     
     // Emit closure creation instruction with the function constant
     if (constant < 256) {
         emit_bytes(OP_CLOSURE, constant);
     } else {
-        // Handle large constant index if needed
         fprintf(stderr, "Large closure constants not implemented\n");
         return NULL;
     }
     
     // Emit upvalue information for the VM to create the closure
-    // For each captured variable, we emit:
-    // - 1 byte: is_local flag (1 if capturing from parent's locals, 0 if from parent's upvalues)
-    // - 1 byte: index (slot number in parent's locals or upvalues array)
     for (int i = 0; i < closure_compiler.function->upvalue_count; i++) {
         emit_byte(closure_compiler.upvalues.values[i].is_local ? 1 : 0);
         emit_byte(closure_compiler.upvalues.values[i].index);
-        if (getenv("SWIFTLANG_DEBUG")) {
-            fprintf(stderr, "[DEBUG] Upvalue %d: is_local=%d, index=%d\n", i,
-                    closure_compiler.upvalues.values[i].is_local,
-                    closure_compiler.upvalues.values[i].index);
-        }
     }
     
-    // Clean up
+    // Note: We don't free the closure_compiler because the function is still needed
+    // Only free the compiler's internal structures
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
     if (closure_compiler.locals.names) {
-        for (size_t i = 0; i < closure_compiler.locals.count; i++) {
-            free(closure_compiler.locals.names[i]);
+        for (int i = 0; i < closure_compiler.locals.count; i++) {
+            if (closure_compiler.locals.names[i]) {
+                size_t len = strlen(closure_compiler.locals.names[i]) + 1;
+                MEM_FREE(alloc, closure_compiler.locals.names[i], len);
+            }
         }
-        free(closure_compiler.locals.names);
-        free(closure_compiler.locals.depths);
+        MEM_FREE(alloc, closure_compiler.locals.names, sizeof(char*) * closure_compiler.locals.capacity);
+    }
+    if (closure_compiler.locals.depths) {
+        MEM_FREE(alloc, closure_compiler.locals.depths, sizeof(int) * closure_compiler.locals.capacity);
     }
     if (closure_compiler.upvalues.values) {
-        free(closure_compiler.upvalues.values);
+        MEM_FREE(alloc, closure_compiler.upvalues.values, sizeof(CompilerUpvalue) * closure_compiler.upvalues.capacity);
     }
     
     return NULL;
@@ -622,11 +592,11 @@ static void* compile_call_expr(ASTVisitor* visitor, Expr* expr) {
         // Compile the object (this will be the first argument)
         ast_accept_expr(member->object, visitor);
         
-        // Duplicate the object on the stack (one for property access, one as first arg)
+        // Duplicate the object on the stack
         emit_byte(OP_DUP);
         
         // Push property name
-        TaggedValue prop = {.type = VAL_STRING, .as.string = strdup(member->property)};
+        TaggedValue prop = create_string_value(member->property);
         emit_constant(prop);
         
         // Get the method
@@ -637,7 +607,6 @@ static void* compile_call_expr(ASTVisitor* visitor, Expr* expr) {
         // So we swap them
         emit_byte(OP_SWAP);
         
-        // Now stack is: [method, object]
         // Compile remaining arguments
         for (size_t i = 0; i < call->argument_count; i++) {
             ast_accept_expr(call->arguments[i], visitor);
@@ -679,26 +648,12 @@ static void* compile_subscript_expr(ASTVisitor* visitor, Expr* expr) {
 static void* compile_member_expr(ASTVisitor* visitor, Expr* expr) {
     MemberExpr* member = &expr->member;
     
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG] compile_member_expr: accessing property '%s'\n", member->property);
-        if (current->type == FUNC_TYPE_FUNCTION && current->enclosing) {
-            fprintf(stderr, "[DEBUG]   Inside closure/function: %s\n", 
-                    current->function ? current->function->name : "<anonymous>");
-        }
-    }
-    
     // Compile object
     ast_accept_expr(member->object, visitor);
     
     // Push property name as constant
-    TaggedValue prop = {.type = VAL_STRING, .as.string = strdup(member->property)};
+    TaggedValue prop = create_string_value(member->property);
     int prop_const = chunk_add_constant(current->current_chunk, prop);
-    
-    if (getenv("SWIFTLANG_DEBUG")) {
-        fprintf(stderr, "[DEBUG]   Property '%s' added as constant at index %d\n", 
-                member->property, prop_const);
-        fprintf(stderr, "[DEBUG]   Emitting: CONSTANT %d, GET_PROPERTY\n", prop_const);
-    }
     
     // Emit the constant
     if (prop_const < 256) {
@@ -816,7 +771,7 @@ static void* compile_string_interp_expr(ASTVisitor* visitor, Expr* expr) {
     StringInterpExpr* interp = &expr->string_interp;
     
     // Start with the first string part
-    TaggedValue first_part = STRING_VAL(interp->parts[0]);
+    TaggedValue first_part = create_string_value(interp->parts[0]);
     emit_constant(first_part);
     
     // For each expression
@@ -832,7 +787,7 @@ static void* compile_string_interp_expr(ASTVisitor* visitor, Expr* expr) {
         
         // Add the next string part
         if (i + 1 < interp->part_count) {
-            TaggedValue next_part = STRING_VAL(interp->parts[i + 1]);
+            TaggedValue next_part = create_string_value(interp->parts[i + 1]);
             emit_constant(next_part);
             emit_byte(OP_ADD);
         }
@@ -841,8 +796,72 @@ static void* compile_string_interp_expr(ASTVisitor* visitor, Expr* expr) {
     return NULL;
 }
 
+// Initialize compiler with allocator
+void init_compiler(Compiler* compiler, CompilerFunctionType type) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+    
+    compiler->enclosing = current;
+    compiler->type = type;
+    compiler->scope_depth = 0;
+    
+    // Initialize locals
+    compiler->locals.count = 0;
+    compiler->locals.capacity = 8;
+    compiler->locals.names = MEM_NEW_ARRAY(alloc, char*, compiler->locals.capacity);
+    compiler->locals.depths = MEM_NEW_ARRAY(alloc, int, compiler->locals.capacity);
+    
+    // Initialize upvalues
+    compiler->upvalues.count = 0;
+    compiler->upvalues.capacity = 8;
+    compiler->upvalues.values = MEM_NEW_ARRAY(alloc, CompilerUpvalue, compiler->upvalues.capacity);
+    
+    // Create function using VM allocator (functions are runtime objects)
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
+    compiler->function = MEM_NEW(vm_alloc, Function);
+    if (compiler->function) {
+        compiler->function->arity = 0;
+        compiler->function->upvalue_count = 0;
+        compiler->function->name = NULL;
+        chunk_init(&compiler->function->chunk);
+    }
+    
+    current = compiler;
+    
+    if (type != FUNC_TYPE_SCRIPT) {
+        // Reserve slot 0 for 'this' in methods or the function itself
+        compiler->locals.names[compiler->locals.count] = MEM_STRDUP(alloc, "");
+        compiler->locals.depths[compiler->locals.count] = 0;
+        compiler->locals.count++;
+    }
+}
 
-// Visitor functions for compiling statements
+// Clean up compiler resources
+void free_compiler(Compiler* compiler) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+    
+    // Free local names
+    for (int i = 0; i < compiler->locals.count; i++) {
+        if (compiler->locals.names[i]) {
+            size_t len = strlen(compiler->locals.names[i]) + 1;
+            MEM_FREE(alloc, compiler->locals.names[i], len);
+        }
+    }
+    
+    // Free arrays
+    if (compiler->locals.names) {
+        MEM_FREE(alloc, compiler->locals.names, sizeof(char*) * compiler->locals.capacity);
+    }
+    if (compiler->locals.depths) {
+        MEM_FREE(alloc, compiler->locals.depths, sizeof(int) * compiler->locals.capacity);
+    }
+    if (compiler->upvalues.values) {
+        MEM_FREE(alloc, compiler->upvalues.values, sizeof(CompilerUpvalue) * compiler->upvalues.capacity);
+    }
+    
+    current = compiler->enclosing;
+}
+
+// Compilation functions for statements
 static void* compile_expression_stmt(ASTVisitor* visitor, Stmt* stmt) {
     Compiler* compiler = (Compiler*)visitor->context;
     ast_accept_expr(stmt->expression.expression, visitor);
@@ -867,11 +886,11 @@ static void* compile_var_decl_stmt(ASTVisitor* visitor, Stmt* stmt) {
     if (current->scope_depth > 0) {
         // Define as local variable
         add_local(current, var_decl->name);
-        // Value is already on the stack
+        mark_initialized();
     } else {
         // Define global variable
         int name_constant = chunk_add_constant(current->current_chunk,
-            (TaggedValue){.type = VAL_STRING, .as.string = strdup(var_decl->name)});
+            create_string_value(var_decl->name));
         emit_bytes(OP_DEFINE_GLOBAL, name_constant);
     }
     
@@ -926,13 +945,7 @@ static void* compile_while_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // Create a new loop structure
     Loop loop;
-    loop.enclosing = current->inner_most_loop;
-    loop.start = current->current_chunk->count;
-    loop.scope_depth = current->scope_depth;
-    loop.break_jumps = NULL;
-    loop.break_count = 0;
-    loop.break_capacity = 0;
-    current->inner_most_loop = &loop;
+    init_loop(&loop);
     
     int loop_start = current->current_chunk->count;
     
@@ -958,86 +971,8 @@ static void* compile_while_stmt(ASTVisitor* visitor, Stmt* stmt) {
     }
     
     // Clean up
-    if (loop.break_jumps) free(loop.break_jumps);
+    free_loop(&loop);
     current->inner_most_loop = loop.enclosing;
-    
-    return NULL;
-}
-
-static void* compile_return_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    ReturnStmt* ret = &stmt->return_stmt;
-    
-    if (ret->expression) {
-        ast_accept_expr(ret->expression, visitor);
-    } else {
-        emit_byte(OP_NIL);
-    }
-    
-    emit_byte(OP_RETURN);
-    return NULL;
-}
-
-static void* compile_break_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    (void)visitor;  // Unused parameter
-    (void)stmt;     // Unused parameter
-    if (current->inner_most_loop == NULL) {
-        fprintf(stderr, "Cannot break outside of a loop\n");
-        return NULL;
-    }
-    
-    // Pop any locals created in the loop
-    int locals_to_pop = 0;
-    for (int i = current->locals.count - 1; i >= 0; i--) {
-        if (current->locals.depths[i] <= current->inner_most_loop->scope_depth) {
-            break;
-        }
-        locals_to_pop++;
-    }
-    
-    for (int i = 0; i < locals_to_pop; i++) {
-        emit_byte(OP_POP);
-    }
-    
-    // Emit jump and record it for patching later
-    int jump_offset = emit_jump(OP_JUMP);
-    
-    // Add to break jumps array
-    if (current->inner_most_loop->break_count >= current->inner_most_loop->break_capacity) {
-        size_t old_capacity = current->inner_most_loop->break_capacity;
-        current->inner_most_loop->break_capacity = old_capacity < 8 ? 8 : old_capacity * 2;
-        current->inner_most_loop->break_jumps = realloc(
-            current->inner_most_loop->break_jumps,
-            sizeof(int) * current->inner_most_loop->break_capacity
-        );
-    }
-    current->inner_most_loop->break_jumps[current->inner_most_loop->break_count++] = jump_offset;
-    
-    return NULL;
-}
-
-static void* compile_continue_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    (void)visitor;  // Unused parameter
-    (void)stmt;     // Unused parameter
-    if (current->inner_most_loop == NULL) {
-        fprintf(stderr, "Cannot continue outside of a loop\n");
-        return NULL;
-    }
-    
-    // Pop any locals created in this iteration
-    int locals_to_pop = 0;
-    for (int i = current->locals.count - 1; i >= 0; i--) {
-        if (current->locals.depths[i] <= current->inner_most_loop->scope_depth) {
-            break;
-        }
-        locals_to_pop++;
-    }
-    
-    for (int i = 0; i < locals_to_pop; i++) {
-        emit_byte(OP_POP);
-    }
-    
-    // Jump back to loop start
-    emit_loop(current->inner_most_loop->start);
     
     return NULL;
 }
@@ -1047,12 +982,7 @@ static void* compile_for_in_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // Create a new loop structure
     Loop loop;
-    loop.enclosing = current->inner_most_loop;
-    loop.scope_depth = current->scope_depth;
-    loop.break_jumps = NULL;
-    loop.break_count = 0;
-    loop.break_capacity = 0;
-    current->inner_most_loop = &loop;
+    init_loop(&loop);
     
     // Compile iterable
     ast_accept_expr(for_in->iterable, visitor);
@@ -1060,8 +990,6 @@ static void* compile_for_in_stmt(ASTVisitor* visitor, Stmt* stmt) {
     // Create iterator
     emit_byte(OP_GET_ITER);
     
-    // At this point, stack has [array, index]
-    // We need to account for these when tracking locals
     // Add dummy locals for the iterator state
     add_local(current, "");  // array
     add_local(current, "");  // index
@@ -1080,7 +1008,7 @@ static void* compile_for_in_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // The element is now on top of stack, store it as a local
     add_local(current, for_in->variable_name);
-    // No need to emit anything - the value is already on the stack
+    mark_initialized();
     
     // Execute body
     ast_accept_stmt(for_in->body, visitor);
@@ -1105,7 +1033,7 @@ static void* compile_for_in_stmt(ASTVisitor* visitor, Stmt* stmt) {
     }
     
     // Clean up
-    if (loop.break_jumps) free(loop.break_jumps);
+    free_loop(&loop);
     current->inner_most_loop = loop.enclosing;
     
     return NULL;
@@ -1116,12 +1044,7 @@ static void* compile_for_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // Create a new loop structure
     Loop loop;
-    loop.enclosing = current->inner_most_loop;
-    loop.scope_depth = current->scope_depth;
-    loop.break_jumps = NULL;
-    loop.break_count = 0;
-    loop.break_capacity = 0;
-    current->inner_most_loop = &loop;
+    init_loop(&loop);
     
     // New scope for the loop (to contain the initializer variable)
     begin_scope();
@@ -1173,8 +1096,76 @@ static void* compile_for_stmt(ASTVisitor* visitor, Stmt* stmt) {
     }
     
     // Clean up
-    if (loop.break_jumps) free(loop.break_jumps);
+    free_loop(&loop);
     current->inner_most_loop = loop.enclosing;
+    
+    return NULL;
+}
+
+static void* compile_return_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    ReturnStmt* ret = &stmt->return_stmt;
+    
+    if (ret->expression) {
+        ast_accept_expr(ret->expression, visitor);
+    } else {
+        emit_byte(OP_NIL);
+    }
+    
+    emit_byte(OP_RETURN);
+    return NULL;
+}
+
+static void* compile_break_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    (void)visitor;  // Unused parameter
+    (void)stmt;     // Unused parameter
+    if (current->inner_most_loop == NULL) {
+        fprintf(stderr, "Cannot break outside of a loop\n");
+        return NULL;
+    }
+    
+    // Pop any locals created in the loop
+    int locals_to_pop = 0;
+    for (int i = current->locals.count - 1; i >= 0; i--) {
+        if (current->locals.depths[i] <= current->inner_most_loop->scope_depth) {
+            break;
+        }
+        locals_to_pop++;
+    }
+    
+    for (int i = 0; i < locals_to_pop; i++) {
+        emit_byte(OP_POP);
+    }
+    
+    // Emit jump and record it for patching later
+    int jump_offset = emit_jump(OP_JUMP);
+    add_break_jump(current->inner_most_loop, jump_offset);
+    
+    return NULL;
+}
+
+static void* compile_continue_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    (void)visitor;  // Unused parameter
+    (void)stmt;     // Unused parameter
+    if (current->inner_most_loop == NULL) {
+        fprintf(stderr, "Cannot continue outside of a loop\n");
+        return NULL;
+    }
+    
+    // Pop any locals created in this iteration
+    int locals_to_pop = 0;
+    for (int i = current->locals.count - 1; i >= 0; i--) {
+        if (current->locals.depths[i] <= current->inner_most_loop->scope_depth) {
+            break;
+        }
+        locals_to_pop++;
+    }
+    
+    for (int i = 0; i < locals_to_pop; i++) {
+        emit_byte(OP_POP);
+    }
+    
+    // Jump back to loop start
+    emit_loop(current->inner_most_loop->start);
     
     return NULL;
 }
@@ -1185,6 +1176,339 @@ static void* compile_defer_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // For now, just emit a placeholder
     fprintf(stderr, "Defer statement not yet implemented in compiler\n");
+    
+    return NULL;
+}
+
+
+static void* compile_function_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    FunctionDecl* func = &stmt->function;
+    
+    // Create a new compiler for the function
+    Compiler func_compiler;
+    init_compiler(&func_compiler, FUNC_TYPE_FUNCTION);
+    func_compiler.function->name = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_BYTECODE), func->name);
+    func_compiler.function->arity = func->parameter_count;
+    
+    // Save current state and switch to function compiler
+    Compiler* previous = current;
+    current = &func_compiler;
+    
+    // Add parameters as local variables starting at slot 1
+    for (size_t i = 0; i < func->parameter_count; i++) {
+        add_local(&func_compiler, func->parameter_names[i]);
+        mark_initialized();
+    }
+    
+    // Compile the function body
+    if (func->body) {
+        ast_accept_stmt(func->body, visitor);
+    }
+    
+    // Emit return if not already present
+    if (func_compiler.function->chunk.count == 0 || 
+        func_compiler.function->chunk.code[func_compiler.function->chunk.count - 1] != OP_RETURN) {
+        emit_byte(OP_NIL);
+        emit_byte(OP_RETURN);
+    }
+    
+    // Switch back to enclosing compiler
+    current = previous;
+    
+    // Add function as a constant and define it as a global
+    TaggedValue func_val = FUNCTION_VAL(func_compiler.function);
+    emit_constant(func_val);
+    
+    int name_constant = chunk_add_constant(current->current_chunk,
+        create_string_value(func->name));
+    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
+    
+    // Check if this is an extension method (name contains "_ext_")
+    if (strstr(func->name, "_ext_") != NULL) {
+        // Extract the type name and method name
+        char* type_end = strstr(func->name, "_ext_");
+        size_t type_len = type_end - func->name;
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+        char* type_name = MEM_NEW_ARRAY(alloc, char, type_len + 1);
+        strncpy(type_name, func->name, type_len);
+        type_name[type_len] = '\0';
+        
+        char* method_name = type_end + 5; // Skip "_ext_"
+        
+        // Check if this is a built-in type or a struct type
+        if (strcmp(type_name, "Number") == 0 || 
+            strcmp(type_name, "String") == 0 || 
+            strcmp(type_name, "Array") == 0) {
+            // Built-in types use object prototype
+            emit_byte(OP_GET_OBJECT_PROTO);
+        } else {
+            // Struct types use their own prototypes
+            emit_constant(create_string_value(type_name));
+            emit_byte(OP_GET_STRUCT_PROTO);
+        }
+        
+        // Push the method name
+        emit_constant(create_string_value(method_name));
+        
+        // Push the function value again
+        emit_constant(func_val);
+        
+        // Set property on prototype
+        emit_byte(OP_SET_PROPERTY);
+        emit_byte(OP_POP); // Pop the result
+        
+        MEM_FREE(alloc, type_name, type_len + 1);
+    }
+    
+    // Clean up function compiler internals (but not the function itself)
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+    if (func_compiler.locals.names) {
+        for (int i = 0; i < func_compiler.locals.count; i++) {
+            if (func_compiler.locals.names[i]) {
+                size_t len = strlen(func_compiler.locals.names[i]) + 1;
+                MEM_FREE(alloc, func_compiler.locals.names[i], len);
+            }
+        }
+        MEM_FREE(alloc, func_compiler.locals.names, sizeof(char*) * func_compiler.locals.capacity);
+    }
+    if (func_compiler.locals.depths) {
+        MEM_FREE(alloc, func_compiler.locals.depths, sizeof(int) * func_compiler.locals.capacity);
+    }
+    if (func_compiler.upvalues.values) {
+        MEM_FREE(alloc, func_compiler.upvalues.values, sizeof(CompilerUpvalue) * func_compiler.upvalues.capacity);
+    }
+    
+    return NULL;
+}
+
+static void* compile_class_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    ClassDecl* class = &stmt->class_decl;
+    
+    // Create the constructor function
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
+    Function* constructor = MEM_NEW(vm_alloc, Function);
+    constructor->name = MEM_STRDUP(vm_alloc, class->name);
+    constructor->arity = 0;
+    constructor->upvalue_count = 0;
+    chunk_init(&constructor->chunk);
+    
+    // Compile constructor body
+    Compiler ctor_compiler;
+    init_compiler(&ctor_compiler, FUNC_TYPE_FUNCTION);
+    ctor_compiler.function = constructor;
+    ctor_compiler.current_chunk = &constructor->chunk;
+    
+    Compiler* previous = current;
+    current = &ctor_compiler;
+    
+    begin_scope();
+    
+    // Create new instance
+    emit_byte(OP_CREATE_OBJECT);
+    
+    // Initialize properties
+    for (size_t i = 0; i < class->member_count; i++) {
+        Stmt* member = class->members[i];
+        
+        if (member->type == STMT_VAR_DECL) {
+            // It's a property
+            VarDeclStmt* prop = &member->var_decl;
+            
+            // Duplicate instance
+            emit_byte(OP_DUP);
+            
+            // Push property name
+            TaggedValue prop_name = create_string_value(prop->name);
+            emit_constant(prop_name);
+            
+            // Push initial value
+            if (prop->initializer) {
+                ast_accept_expr(prop->initializer, visitor);
+            } else {
+                emit_byte(OP_NIL);
+            }
+            
+            // Set property
+            emit_byte(OP_SET_PROPERTY);
+            emit_byte(OP_POP);
+        }
+    }
+    
+    // Add methods directly to the instance
+    for (size_t i = 0; i < class->member_count; i++) {
+        Stmt* member = class->members[i];
+        
+        if (member->type == STMT_FUNCTION) {
+            // It's a method
+            FunctionDecl* method = &member->function;
+            
+            // Duplicate instance
+            emit_byte(OP_DUP);
+            
+            // Push method name
+            TaggedValue method_name = create_string_value(method->name);
+            emit_constant(method_name);
+            
+            // Compile method as a function
+            Function* func = MEM_NEW(vm_alloc, Function);
+            func->name = MEM_STRDUP(vm_alloc, method->name);
+            func->arity = method->parameter_count;
+            func->upvalue_count = 0;
+            chunk_init(&func->chunk);
+            
+            // Compile method body
+            Compiler method_compiler;
+            init_compiler(&method_compiler, FUNC_TYPE_FUNCTION);
+            method_compiler.function = func;
+            method_compiler.current_chunk = &func->chunk;
+            
+            Compiler* saved = current;
+            current = &method_compiler;
+            
+            begin_scope();
+            
+            // Add 'self' as first local
+            add_local(&method_compiler, "self");
+            mark_initialized();
+            
+            // Add method parameters
+            for (size_t j = 0; j < method->parameter_count; j++) {
+                add_local(&method_compiler, method->parameter_names[j]);
+                mark_initialized();
+            }
+            
+            // Compile method body
+            ast_accept_stmt(method->body, visitor);
+            
+            // Emit return if needed
+            if (method_compiler.function->chunk.count == 0 || 
+                method_compiler.function->chunk.code[method_compiler.function->chunk.count - 1] != OP_RETURN) {
+                emit_byte(OP_NIL);
+                emit_byte(OP_RETURN);
+            }
+            
+            end_scope();
+            
+            current = saved;
+            
+            // Add function as a constant
+            TaggedValue func_val = FUNCTION_VAL(func);
+            emit_constant(func_val);
+            
+            // Set method on instance
+            emit_byte(OP_SET_PROPERTY);
+            emit_byte(OP_POP);
+            
+            // Clean up method compiler
+            free_compiler(&method_compiler);
+        }
+    }
+    
+    // Return the instance
+    emit_byte(OP_RETURN);
+    
+    end_scope();
+    
+    current = previous;
+    
+    // Define the constructor function as a global
+    TaggedValue ctor_val = FUNCTION_VAL(constructor);
+    emit_constant(ctor_val);
+    
+    int name_constant = chunk_add_constant(current->current_chunk,
+        create_string_value(class->name));
+    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
+    
+    // Clean up constructor compiler
+    free_compiler(&ctor_compiler);
+    
+    return NULL;
+}
+
+static void* compile_struct_stmt(ASTVisitor* visitor, Stmt* stmt) {
+    (void)visitor;  // Unused parameter
+    StructDecl* struct_decl = &stmt->struct_decl;
+    
+    // Extract field names from member declarations
+    size_t field_count = 0;
+    for (size_t i = 0; i < struct_decl->member_count; i++) {
+        if (struct_decl->members[i]->type == STMT_VAR_DECL) {
+            field_count++;
+        }
+    }
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+    char** field_names = MEM_NEW_ARRAY(alloc, char*, field_count);
+    size_t field_index = 0;
+    
+    for (size_t i = 0; i < struct_decl->member_count; i++) {
+        if (struct_decl->members[i]->type == STMT_VAR_DECL) {
+            field_names[field_index++] = struct_decl->members[i]->var_decl.name;
+        }
+    }
+    
+    // Emit struct definition with inline field names
+    emit_byte(OP_DEFINE_STRUCT);
+    
+    // Add struct name as a constant
+    int name_const = chunk_add_constant(current->current_chunk, 
+        create_string_value(struct_decl->name));
+    emit_byte(name_const);
+    
+    // Emit field count
+    emit_byte(field_count);
+    
+    // Emit field names as inline constants
+    for (size_t i = 0; i < field_count; i++) {
+        int field_const = chunk_add_constant(current->current_chunk,
+            create_string_value(field_names[i]));
+        emit_byte(field_const);
+    }
+    
+    // Now create a constructor function that uses OP_CREATE_STRUCT
+    Function* constructor = function_create(struct_decl->name, field_count);
+    
+    // Save current compiler state
+    Compiler* enclosing = current;
+    Compiler struct_compiler;
+    init_compiler(&struct_compiler, FUNC_TYPE_FUNCTION);
+    struct_compiler.function = constructor;
+    struct_compiler.current_chunk = &constructor->chunk;
+    current = &struct_compiler;
+    
+    // Add parameters as local variables
+    for (size_t i = 0; i < field_count; i++) {
+        add_local(&struct_compiler, field_names[i]);
+        mark_initialized();
+    }
+    
+    // Emit constructor body
+    // Push field values in order
+    for (size_t i = 0; i < field_count; i++) {
+        emit_bytes(OP_GET_LOCAL, i + 1); // +1 to skip slot 0 (function itself)
+    }
+    
+    // Create struct instance
+    emit_byte(OP_CREATE_STRUCT);
+    int struct_name_const = chunk_add_constant(current->current_chunk,
+        create_string_value(struct_decl->name));
+    emit_byte(struct_name_const);
+    
+    // Return the struct instance
+    emit_byte(OP_RETURN);
+    
+    // Restore compiler state
+    current = enclosing;
+    
+    // Define the constructor as a global function
+    emit_constant(FUNCTION_VAL(constructor));
+    int name_constant = chunk_add_constant(current->current_chunk,
+        create_string_value(struct_decl->name));
+    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
+    
+    // Clean up
+    MEM_FREE(alloc, field_names, sizeof(char*) * field_count);
+    free_compiler(&struct_compiler);
     
     return NULL;
 }
@@ -1200,7 +1524,8 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
     if (module_name[0] == '"' || module_name[0] == '\'') {
         size_t len = strlen(module_name);
         if (len >= 2 && module_name[len-1] == module_name[0]) {
-            char* unquoted = malloc(len - 1);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_COMPILER);
+            char* unquoted = MEM_NEW_ARRAY(alloc, char, len - 1);
             memcpy(unquoted, module_name + 1, len - 2);
             unquoted[len - 2] = '\0';
             module_name = unquoted;
@@ -1208,8 +1533,6 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
     }
     
     // For builtin modules, we need to emit code to load the functions
-    // Builtin modules are: string, array, io (no dots, no paths)
-    // Note: math is now a file-based module, not a builtin
     bool is_builtin = strcmp(module_name, "string") == 0 ||
                       strcmp(module_name, "array") == 0 ||
                       strcmp(module_name, "io") == 0;
@@ -1226,11 +1549,11 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     
                     // Emit bytecode to load builtin function
                     // Push module name
-                    TaggedValue module_str = STRING_VAL(strdup(module_name));
+                    TaggedValue module_str = create_string_value(module_name);
                     emit_constant(module_str);
                     
                     // Push export name
-                    TaggedValue export_str = STRING_VAL(strdup(export_name));
+                    TaggedValue export_str = create_string_value(export_name);
                     emit_constant(export_str);
                     
                     // Call builtin loader
@@ -1238,29 +1561,28 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     
                     // Define as global
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(local_name)));
+                        create_string_value(local_name));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 }
                 break;
                 
             case IMPORT_ALL:
                 // For now, we don't support importing all from builtin modules
-                // This would require a more complex implementation
                 break;
                 
             case IMPORT_DEFAULT:
                 // Similar to specific imports but for "default" export
                 if (import->default_name) {
-                    TaggedValue module_str = STRING_VAL(strdup(module_name));
+                    TaggedValue module_str = create_string_value(module_name);
                     emit_constant(module_str);
                     
-                    TaggedValue export_str = STRING_VAL(strdup("default"));
+                    TaggedValue export_str = create_string_value("default");
                     emit_constant(export_str);
                     
                     emit_byte(OP_LOAD_BUILTIN);
                     
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(import->default_name)));
+                        create_string_value(import->default_name));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 }
                 break;
@@ -1272,11 +1594,10 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
     } else {
         // Handle file-based modules
         // First, emit code to load the module
-        TaggedValue module_path_val = STRING_VAL(strdup(module_name));
+        TaggedValue module_path_val = create_string_value(module_name);
         emit_constant(module_path_val);
         
         // For all module types, use OP_LOAD_MODULE
-        // The module loader will determine if it's native based on the module metadata
         emit_byte(OP_LOAD_MODULE);
         
         // The module object is now on the stack
@@ -1292,7 +1613,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     emit_byte(OP_DUP);
                     
                     // Push export name
-                    TaggedValue export_str = STRING_VAL(strdup(export_name));
+                    TaggedValue export_str = create_string_value(export_name);
                     emit_constant(export_str);
                     
                     // Get export from module
@@ -1300,7 +1621,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     
                     // Define as global
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(local_name)));
+                        create_string_value(local_name));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 }
                 // Pop the module object
@@ -1312,17 +1633,15 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                 if (import->alias) {
                     // import module as alias
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(import->alias)));
+                        create_string_value(import->alias));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 } else if (import->namespace_alias) {
                     // Old style: import * as name from module
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(import->namespace_alias)));
+                        create_string_value(import->namespace_alias));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 } else if (import->import_all_to_scope) {
                     // import * from module - import all exports into current scope
-                    // The module object is on the stack, we need to iterate through its properties
-                    // and define each as a global
                     emit_byte(OP_IMPORT_ALL_FROM);
                 } else {
                     // No alias - define module with its original name
@@ -1350,7 +1669,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     }
                     
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(module_simple_name)));
+                        create_string_value(module_simple_name));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 }
                 break;
@@ -1359,7 +1678,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                 // import name from 'module'
                 if (import->default_name) {
                     // Push "default" as export name
-                    TaggedValue export_str = STRING_VAL(strdup("default"));
+                    TaggedValue export_str = create_string_value("default");
                     emit_constant(export_str);
                     
                     // Get default export
@@ -1367,7 +1686,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     
                     // Define as global
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(import->default_name)));
+                        create_string_value(import->default_name));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 } else {
                     // Pop the module if no default name
@@ -1379,7 +1698,7 @@ static void* compile_import_stmt(ASTVisitor* visitor, Stmt* stmt) {
                 // import * as namespace from 'module'
                 if (import->namespace_alias) {
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(import->namespace_alias)));
+                        create_string_value(import->namespace_alias));
                     emit_bytes(OP_DEFINE_GLOBAL, name_constant);
                 } else {
                     emit_byte(OP_POP);
@@ -1395,30 +1714,17 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
     (void)visitor;  // Unused parameter
     ExportDecl* export = &stmt->export_decl;
     
-    // Export statements need to add values to the module's export object
-    // We need a way to access the current module object during compilation
-    // For now, we'll use a global variable __module_exports__
-    
-    // fprintf(stderr, "[DEBUG] Compiling export statement of type: %d\n", export->type);
-    
     switch (export->type) {
         case EXPORT_NAMED:
             // export { name1, name2 as alias2 }
             if (export->named_export.specifiers) {
-                if (getenv("SWIFTLANG_DEBUG")) {
-                    fprintf(stderr, "[DEBUG] Compiling EXPORT_NAMED with %zu specifiers\n", export->named_export.specifier_count);
-                }
                 for (size_t i = 0; i < export->named_export.specifier_count; i++) {
                     const char* local_name = export->named_export.specifiers[i].name;
                     const char* export_name = export->named_export.specifiers[i].alias ? 
                         export->named_export.specifiers[i].alias : export->named_export.specifiers[i].name;
                     
-                    if (getenv("SWIFTLANG_DEBUG")) {
-                        fprintf(stderr, "[DEBUG] Exporting %s as %s\n", local_name, export_name);
-                    }
-                    
                     // Push the export name
-                    TaggedValue export_str = STRING_VAL(strdup(export_name));
+                    TaggedValue export_str = create_string_value(export_name);
                     emit_constant(export_str);
                     
                     // Get the local value
@@ -1427,7 +1733,7 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)local);
                     } else {
                         int name_constant = chunk_add_constant(current->current_chunk,
-                            STRING_VAL(strdup(local_name)));
+                            create_string_value(local_name));
                         emit_bytes(OP_GET_GLOBAL, name_constant);
                     }
                     
@@ -1441,7 +1747,7 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
             // export default expression
             if (export->default_export.name) {
                 // Push "default" as export name
-                TaggedValue default_str = STRING_VAL(strdup("default"));
+                TaggedValue default_str = create_string_value("default");
                 emit_constant(default_str);
                 
                 // Get the value to export
@@ -1450,7 +1756,7 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
                     emit_bytes(OP_GET_LOCAL, (uint8_t)local);
                 } else {
                     int name_constant = chunk_add_constant(current->current_chunk,
-                        STRING_VAL(strdup(export->default_export.name)));
+                        create_string_value(export->default_export.name));
                     emit_bytes(OP_GET_GLOBAL, name_constant);
                 }
                 
@@ -1483,7 +1789,7 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
                 
                 if (export_name) {
                     // Push the export name
-                    TaggedValue export_str = STRING_VAL(strdup(export_name));
+                    TaggedValue export_str = create_string_value(export_name);
                     emit_constant(export_str);
                     
                     // Get the value to export
@@ -1492,7 +1798,7 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
                         emit_bytes(OP_GET_LOCAL, (uint8_t)local);
                     } else {
                         int name_constant = chunk_add_constant(current->current_chunk,
-                            STRING_VAL(strdup(export_name)));
+                            create_string_value(export_name));
                         emit_bytes(OP_GET_GLOBAL, name_constant);
                     }
                     
@@ -1506,386 +1812,22 @@ static void* compile_export_stmt(ASTVisitor* visitor, Stmt* stmt) {
     return NULL;
 }
 
-static void* compile_class_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    ClassDecl* class = &stmt->class_decl;
-    
-    // Simplified class implementation:
-    // 1. Create a constructor function that creates objects with properties
-    // 2. Methods are added directly to each instance (not optimal but simple)
-    
-    // Create the constructor function
-    Function* constructor = malloc(sizeof(Function));
-    constructor->name = class->name;
-    constructor->arity = 0;
-    constructor->upvalue_count = 0;
-    chunk_init(&constructor->chunk);
-    
-    // Compile constructor body
-    Compiler ctor_compiler = {
-        .enclosing = current,
-        .type = FUNC_TYPE_FUNCTION,
-        .function = constructor,
-        .current_chunk = &constructor->chunk,
-        .locals = {.names = NULL, .depths = NULL, .count = 0, .capacity = 0},
-        .upvalues = {.values = NULL, .count = 0, .capacity = 0},
-        .scope_depth = 0,
-        .inner_most_loop = NULL
-    };
-    
-    Compiler* previous = current;
-    current = &ctor_compiler;
-    
-    begin_scope();
-    
-    // Reserve slot 0 for the constructor function itself
-    add_local(&ctor_compiler, "");
-    
-    // Create new instance
-    emit_byte(OP_CREATE_OBJECT);
-    
-    // Initialize properties
-    for (size_t i = 0; i < class->member_count; i++) {
-        Stmt* member = class->members[i];
-        
-        if (member->type == STMT_VAR_DECL) {
-            // It's a property
-            VarDeclStmt* prop = &member->var_decl;
-            
-            // Duplicate instance
-            emit_byte(OP_DUP);
-            
-            // Push property name
-            TaggedValue prop_name = STRING_VAL(strdup(prop->name));
-            emit_constant(prop_name);
-            
-            // Push initial value
-            if (prop->initializer) {
-                ast_accept_expr(prop->initializer, visitor);
-            } else {
-                emit_byte(OP_NIL);
-            }
-            
-            // Set property
-            emit_byte(OP_SET_PROPERTY);
-            emit_byte(OP_POP);
-        }
-    }
-    
-    // Add methods directly to the instance (not using prototype for simplicity)
-    for (size_t i = 0; i < class->member_count; i++) {
-        Stmt* member = class->members[i];
-        
-        if (member->type == STMT_FUNCTION) {
-            // It's a method
-            FunctionDecl* method = &member->function;
-            
-            // Duplicate instance
-            emit_byte(OP_DUP);
-            
-            // Push method name
-            TaggedValue method_name = STRING_VAL(strdup(method->name));
-            emit_constant(method_name);
-            
-            // Compile method as a closure that captures 'this'
-            // For simplicity, we'll compile it as a regular function
-            // and handle 'this' binding at call time
-            Function* func = malloc(sizeof(Function));
-            func->name = method->name;
-            func->arity = method->parameter_count; // Don't include self in arity
-            func->upvalue_count = 0;
-            chunk_init(&func->chunk);
-            
-            // Compile method body
-            Compiler method_compiler = {
-                .enclosing = current,
-                .type = FUNC_TYPE_FUNCTION,
-                .function = func,
-                .current_chunk = &func->chunk,
-                .locals = {.names = NULL, .depths = NULL, .count = 0, .capacity = 0},
-                .upvalues = {.values = NULL, .count = 0, .capacity = 0},
-                .scope_depth = 0,
-                .inner_most_loop = NULL
-            };
-            
-            Compiler* saved = current;
-            current = &method_compiler;
-            
-            begin_scope();
-            
-            // Add 'self' as first local (slot 0)
-            add_local(&method_compiler, "");  // Reserve slot 0
-            add_local(&method_compiler, "self");  // 'self' is at slot 1
-            
-            // Add method parameters
-            for (size_t j = 0; j < method->parameter_count; j++) {
-                add_local(&method_compiler, method->parameter_names[j]);
-            }
-            
-            // Compile method body
-            ast_accept_stmt(method->body, visitor);
-            
-            // Emit return if needed
-            if (method_compiler.function->chunk.count == 0 || 
-                method_compiler.function->chunk.code[method_compiler.function->chunk.count - 1] != OP_RETURN) {
-                emit_byte(OP_NIL);
-                emit_byte(OP_RETURN);
-            }
-            
-            end_scope();
-            
-            current = saved;
-            
-            // Add function as a constant
-            TaggedValue func_val = FUNCTION_VAL(func);
-            emit_constant(func_val);
-            
-            // Set method on instance
-            emit_byte(OP_SET_PROPERTY);
-            emit_byte(OP_POP);
-        }
-    }
-    
-    // Return the instance
-    emit_byte(OP_RETURN);
-    
-    end_scope();
-    
-    current = previous;
-    
-    // Define the constructor function as a global
-    TaggedValue ctor_val = FUNCTION_VAL(constructor);
-    emit_constant(ctor_val);
-    
-    int name_constant = chunk_add_constant(current->current_chunk,
-        STRING_VAL(strdup(class->name)));
-    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
-    
-    return NULL;
-}
-
-static void* compile_struct_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    (void)visitor;  // Unused parameter
-    StructDecl* struct_decl = &stmt->struct_decl;
-    
-    // Extract field names and types from member declarations
-    size_t field_count = 0;
-    for (size_t i = 0; i < struct_decl->member_count; i++) {
-        if (struct_decl->members[i]->type == STMT_VAR_DECL) {
-            field_count++;
-        }
-    }
-    
-    char** field_names = malloc(field_count * sizeof(char*));
-    size_t field_index = 0;
-    
-    for (size_t i = 0; i < struct_decl->member_count; i++) {
-        if (struct_decl->members[i]->type == STMT_VAR_DECL) {
-            field_names[field_index++] = strdup(struct_decl->members[i]->var_decl.name);
-        }
-    }
-    
-    // Emit struct definition with inline field names
-    emit_byte(OP_DEFINE_STRUCT);
-    
-    // Add struct name as a constant
-    int name_const = chunk_add_constant(current->current_chunk, 
-        STRING_VAL(strdup(struct_decl->name)));
-    // fprintf(stderr, "[DEBUG] Struct name '%s' at constant index %d\n", struct_decl->name, name_const);
-    emit_byte(name_const);
-    
-    // Emit field count
-    emit_byte(field_count);
-    
-    // Emit field names as inline constants
-    for (size_t i = 0; i < field_count; i++) {
-        int field_const = chunk_add_constant(current->current_chunk,
-            STRING_VAL(strdup(field_names[i])));
-        // fprintf(stderr, "[DEBUG] Field '%s' at constant index %d\n", field_names[i], field_const);
-        emit_byte(field_const);
-    }
-    
-    // Now create a constructor function that uses OP_CREATE_STRUCT
-    Function* constructor = function_create(struct_decl->name, field_count);
-    
-    // Save current compiler state
-    Compiler* enclosing = current;
-    Compiler struct_compiler = {
-        .enclosing = enclosing,
-        .type = FUNC_TYPE_FUNCTION,
-        .function = constructor,
-        .current_chunk = &constructor->chunk,
-        .locals = {.count = 0, .capacity = 0, .names = NULL, .depths = NULL},
-        .upvalues = {.count = 0, .capacity = 0, .values = NULL},
-        .scope_depth = 0,
-        .inner_most_loop = NULL
-    };
-    current = &struct_compiler;
-    
-    // Reserve slot 0 for the function itself
-    add_local(&struct_compiler, "");
-    mark_initialized();
-    
-    // Add parameters as local variables
-    for (size_t i = 0; i < field_count; i++) {
-        add_local(&struct_compiler, field_names[i]);
-        mark_initialized();
-    }
-    
-    // Emit constructor body
-    // Push field values in order
-    for (size_t i = 0; i < field_count; i++) {
-        emit_bytes(OP_GET_LOCAL, i + 1); // +1 to skip slot 0 (function itself)
-    }
-    
-    // Create struct instance
-    emit_byte(OP_CREATE_STRUCT);
-    int struct_name_const = chunk_add_constant(current->current_chunk,
-        STRING_VAL(strdup(struct_decl->name)));
-    emit_byte(struct_name_const);
-    
-    // Return the struct instance
-    emit_byte(OP_RETURN);
-    
-    // Debug: print constructor bytecode
-    // if (getenv("SWIFTLANG_DEBUG")) {
-    //     fprintf(stderr, "[DEBUG] Constructor bytecode for %s:\n", struct_decl->name);
-    //     for (size_t i = 0; i < constructor->chunk.count; i++) {
-    //         fprintf(stderr, "  [%zu] %d\n", i, constructor->chunk.code[i]);
-    //     }
-    // }
-    
-    // Restore compiler state
-    current = enclosing;
-    
-    // Define the constructor as a global function
-    emit_constant(FUNCTION_VAL(constructor));
-    int name_constant = chunk_add_constant(current->current_chunk,
-        STRING_VAL(strdup(struct_decl->name)));
-    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
-    
-    // Clean up
-    free(field_names);
-    
-    return NULL;
-}
-
-static void* compile_function_stmt(ASTVisitor* visitor, Stmt* stmt) {
-    FunctionDecl* func = &stmt->function;
-    
-    // Create a new function object
-    Function* function = function_create(func->name, func->parameter_count);
-    
-    // Save current compiler state
-    Chunk* enclosing_chunk = current->current_chunk;
-    int enclosing_scope = current->scope_depth;
-    size_t enclosing_local_count = current->locals.count;
-    
-    // Compile function body into the function's chunk
-    current->current_chunk = &function->chunk;
-    current->scope_depth = 0;
-    
-    // Begin a new scope for the function body
-    begin_scope();
-    
-    // Reserve slot 0 for the function itself
-    add_local(current, "");  // Empty name for function slot
-    
-    // Add parameters as local variables starting at slot 1
-    for (size_t i = 0; i < func->parameter_count; i++) {
-        add_local(current, func->parameter_names[i]);
-    }
-    
-    // Compile the function body
-    if (func->body) {
-        ast_accept_stmt(func->body, visitor);
-    }
-    
-    // End the function scope
-    end_scope();
-    
-    // Emit return if not already present
-    if (current->current_chunk->count == 0 || 
-        current->current_chunk->code[current->current_chunk->count - 1] != OP_RETURN) {
-        emit_byte(OP_NIL);
-        emit_byte(OP_RETURN);
-    }
-    
-    // Restore compiler state
-    current->current_chunk = enclosing_chunk;
-    current->scope_depth = enclosing_scope;
-    current->locals.count = enclosing_local_count;
-    
-    // Add function as a constant and define it as a global
-    TaggedValue func_val = FUNCTION_VAL(function);
-    emit_constant(func_val);
-    
-    int name_constant = chunk_add_constant(current->current_chunk,
-        (TaggedValue){.type = VAL_STRING, .as.string = strdup(func->name)});
-    emit_bytes(OP_DEFINE_GLOBAL, name_constant);
-    
-    // Check if this is an extension method (name contains "_ext_")
-    if (strstr(func->name, "_ext_") != NULL) {
-        // Extract the type name and method name
-        // Format: TypeName_ext_methodName
-        char* type_end = strstr(func->name, "_ext_");
-        size_t type_len = type_end - func->name;
-        char* type_name = malloc(type_len + 1);
-        strncpy(type_name, func->name, type_len);
-        type_name[type_len] = '\0';
-        
-        char* method_name = type_end + 5; // Skip "_ext_"
-        
-        // fprintf(stderr, "[DEBUG] Registering extension method '%s' for type '%s' as method '%s'\n", 
-        //         func->name, type_name, method_name);
-        
-        // Check if this is a built-in type or a struct type
-        if (strcmp(type_name, "Number") == 0 || 
-            strcmp(type_name, "String") == 0 || 
-            strcmp(type_name, "Array") == 0) {
-            // Built-in types use object prototype
-            emit_byte(OP_GET_OBJECT_PROTO);
-        } else {
-            // Struct types use their own prototypes
-            emit_constant(STRING_VAL(strdup(type_name)));
-            emit_byte(OP_GET_STRUCT_PROTO);
-        }
-        
-        // Push the method name
-        emit_constant(STRING_VAL(strdup(method_name)));
-        
-        // Push the function value again
-        emit_constant(func_val);
-        
-        // Set property on prototype
-        emit_byte(OP_SET_PROPERTY);
-        emit_byte(OP_POP); // Pop the result
-        
-        free(type_name);
-    }
-    
-    return NULL;
-}
-
+// Main compile function
 bool compile(ProgramNode* program, Chunk* chunk) {
-    Function main_function = {
-        .name = "<script>",
-        .arity = 0,
-        .upvalue_count = 0
-    };
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
+    Function* main_function = MEM_NEW(vm_alloc, Function);
+    main_function->name = MEM_STRDUP(vm_alloc, "<script>");
+    main_function->arity = 0;
+    main_function->upvalue_count = 0;
+    main_function->chunk = *chunk;  // Use provided chunk
     
-    Compiler compiler = {
-        .enclosing = NULL,
-        .type = FUNC_TYPE_SCRIPT,
-        .function = &main_function,
-        .current_chunk = chunk,
-        .locals = {.names = NULL, .depths = NULL, .count = 0, .capacity = 0},
-        .upvalues = {.values = NULL, .count = 0, .capacity = 0},
-        .scope_depth = 0,
-        .inner_most_loop = NULL,
-        .is_last_expr_stmt = false,
-        .program = program,
-        .current_stmt_index = 0
-    };
+    Compiler compiler;
+    init_compiler(&compiler, FUNC_TYPE_SCRIPT);
+    compiler.function = main_function;
+    compiler.current_chunk = chunk;
+    compiler.is_last_expr_stmt = false;
+    compiler.program = program;
+    compiler.current_stmt_index = 0;
     
     current = &compiler;
     
@@ -1947,14 +1889,8 @@ bool compile(ProgramNode* program, Chunk* chunk) {
     }
     emit_byte(OP_RETURN);
     
-    // Clean up locals
-    if (compiler.locals.names) {
-        for (size_t i = 0; i < compiler.locals.count; i++) {
-            free(compiler.locals.names[i]);
-        }
-        free(compiler.locals.names);
-        free(compiler.locals.depths);
-    }
+    // Clean up compiler
+    free_compiler(&compiler);
     
     current = NULL;
     return true;

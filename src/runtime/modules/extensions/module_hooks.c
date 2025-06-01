@@ -1,7 +1,8 @@
 #include "runtime/modules/extensions/module_hooks.h"
 #include "utils/hash_map.h"
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include "runtime/core/vm.h"
-#include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -64,7 +65,7 @@ void module_hooks_cleanup(void) {
     GlobalHookEntry* entry = g_hook_system.global_hooks;
     while (entry) {
         GlobalHookEntry* next = entry->next;
-        free(entry);
+        MODULES_FREE(entry, sizeof(GlobalHookEntry));
         entry = next;
     }
     g_hook_system.global_hooks = NULL;
@@ -79,9 +80,12 @@ bool module_set_hooks(const char* module_name, const ModuleHooks* hooks) {
     
     pthread_mutex_lock(&g_hook_system.lock);
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Create hook entry
-    HookEntry* entry = malloc(sizeof(HookEntry));
-    entry->module_name = strdup(module_name);
+    HookEntry* entry = MODULES_NEW(HookEntry);
+    entry->module_name = STRINGS_STRDUP(module_name);
     entry->hooks = *hooks;
     entry->next = NULL;
     
@@ -112,8 +116,8 @@ void module_remove_hooks(const char* module_name) {
     
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module_name);
     if (entry) {
-        free(entry->module_name);
-        free(entry);
+        STRINGS_FREE(entry->module_name, strlen(entry->module_name) + 1);
+        MODULES_FREE(entry, sizeof(HookEntry));
         hash_map_remove(g_hook_system.module_hooks, module_name);
         g_hook_system.total_hooks--;
     }
@@ -127,8 +131,10 @@ int module_register_global_hooks(const GlobalModuleHooks* hooks, int priority) {
     
     pthread_mutex_lock(&g_hook_system.lock);
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     // Create new entry
-    GlobalHookEntry* new_entry = malloc(sizeof(GlobalHookEntry));
+    GlobalHookEntry* new_entry = MODULES_NEW(GlobalHookEntry);
     new_entry->id = g_hook_system.next_global_id++;
     new_entry->priority = priority;
     new_entry->hooks = *hooks;
@@ -153,12 +159,14 @@ int module_register_global_hooks(const GlobalModuleHooks* hooks, int priority) {
 void module_unregister_global_hooks(int hook_id) {
     pthread_mutex_lock(&g_hook_system.lock);
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     GlobalHookEntry** current = &g_hook_system.global_hooks;
     while (*current) {
         if ((*current)->id == hook_id) {
             GlobalHookEntry* to_remove = *current;
             *current = to_remove->next;
-            free(to_remove);
+            MODULES_FREE(to_remove, sizeof(GlobalHookEntry));
             g_hook_system.total_hooks--;
             break;
         }
@@ -340,8 +348,11 @@ static void script_unload_hook(Module* module, VM* vm) {
 bool module_set_script_init_hook(const char* module_name, const char* init_function_name) {
     if (!module_name || !init_function_name) return false;
     
-    ScriptHookData* data = malloc(sizeof(ScriptHookData));
-    data->function_name = strdup(init_function_name);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    ScriptHookData* data = MODULES_NEW(ScriptHookData);
+    data->function_name = STRINGS_STRDUP(init_function_name);
     data->is_init_hook = true;
     
     ModuleHooks hooks = {0};
@@ -355,8 +366,11 @@ bool module_set_script_init_hook(const char* module_name, const char* init_funct
 bool module_set_script_unload_hook(const char* module_name, const char* unload_function_name) {
     if (!module_name || !unload_function_name) return false;
     
-    ScriptHookData* data = malloc(sizeof(ScriptHookData));
-    data->function_name = strdup(unload_function_name);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    ScriptHookData* data = MODULES_NEW(ScriptHookData);
+    data->function_name = STRINGS_STRDUP(unload_function_name);
     data->is_init_hook = false;
     
     ModuleHooks hooks = {0};

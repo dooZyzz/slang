@@ -1,6 +1,7 @@
 #include "runtime/modules/formats/module_archive.h"
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -48,8 +49,11 @@ struct ModuleArchive {
 };
 
 ModuleArchive* module_archive_create(const char* path) {
-    ModuleArchive* archive = calloc(1, sizeof(ModuleArchive));
-    archive->path = strdup(path);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    ModuleArchive* archive = MODULES_NEW_ZERO(ModuleArchive);
+    archive->path = STRINGS_STRDUP(path);
     archive->write_mode = true;
     archive->format = g_archive_format;
     
@@ -57,18 +61,19 @@ ModuleArchive* module_archive_create(const char* path) {
         // Initialize ZIP archive for writing
         memset(&archive->zip_archive, 0, sizeof(archive->zip_archive));
         if (!mz_zip_writer_init_file(&archive->zip_archive, path, 0)) {
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         archive->zip_initialized = true;
     } else {
         // Custom format initialization
         archive->entries.capacity = 16;
-        archive->entries.entries = calloc(archive->entries.capacity, sizeof(ArchiveEntry));
+        archive->entries.entries = MODULES_NEW_ARRAY_ZERO(ArchiveEntry, archive->entries.capacity);
         
         archive->buffer.capacity = 1024 * 1024; // 1MB initial buffer
-        archive->buffer.data = malloc(archive->buffer.capacity);
+        archive->buffer.data = MODULES_ALLOC(archive->buffer.capacity);
     }
     
     return archive;
@@ -76,6 +81,9 @@ ModuleArchive* module_archive_create(const char* path) {
 
 void module_archive_destroy(ModuleArchive* archive) {
     if (!archive) return;
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     if (archive->zip_initialized) {
         if (archive->write_mode) {
@@ -90,27 +98,48 @@ void module_archive_destroy(ModuleArchive* archive) {
         fclose(archive->file);
     }
     
-    free(archive->path);
-    free(archive->entries.entries);
-    free(archive->buffer.data);
-    free(archive);
+    size_t path_len = strlen(archive->path) + 1;
+    STRINGS_FREE(archive->path, path_len);
+    
+    if (archive->entries.entries) {
+        MODULES_FREE(archive->entries.entries, archive->entries.capacity * sizeof(ArchiveEntry));
+    }
+    
+    if (archive->buffer.data) {
+        MODULES_FREE(archive->buffer.data, archive->buffer.capacity);
+    }
+    
+    MODULES_FREE(archive, sizeof(ModuleArchive));
 }
 
 static void ensure_buffer_capacity(ModuleArchive* archive, size_t needed) {
     size_t required = archive->buffer.size + needed;
     if (required > archive->buffer.capacity) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+        
+        size_t old_capacity = archive->buffer.capacity;
         while (archive->buffer.capacity < required) {
             archive->buffer.capacity *= 2;
         }
-        archive->buffer.data = realloc(archive->buffer.data, archive->buffer.capacity);
+        
+        uint8_t* new_data = MODULES_ALLOC(archive->buffer.capacity);
+        memcpy(new_data, archive->buffer.data, archive->buffer.size);
+        MODULES_FREE(archive->buffer.data, old_capacity);
+        archive->buffer.data = new_data;
     }
 }
 
 static void add_entry(ModuleArchive* archive, const char* name, uint8_t type, const uint8_t* data, size_t size) {
     if (archive->entries.count >= archive->entries.capacity) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+        
+        size_t old_capacity = archive->entries.capacity;
         archive->entries.capacity *= 2;
-        archive->entries.entries = realloc(archive->entries.entries, 
-                                         archive->entries.capacity * sizeof(ArchiveEntry));
+        
+        ArchiveEntry* new_entries = MODULES_NEW_ARRAY(ArchiveEntry, archive->entries.capacity);
+        memcpy(new_entries, archive->entries.entries, old_capacity * sizeof(ArchiveEntry));
+        MODULES_FREE(archive->entries.entries, old_capacity * sizeof(ArchiveEntry));
+        archive->entries.entries = new_entries;
     }
     
     ArchiveEntry* entry = &archive->entries.entries[archive->entries.count++];
@@ -133,6 +162,8 @@ bool module_archive_add_file(ModuleArchive* archive, const char* file_path, cons
         // Use miniz to add file to ZIP
         return mz_zip_writer_add_file(&archive->zip_archive, archive_path, file_path, NULL, 0, MZ_DEFAULT_COMPRESSION);
     } else {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+        
         // Custom format
         FILE* f = fopen(file_path, "rb");
         if (!f) return false;
@@ -141,17 +172,17 @@ bool module_archive_add_file(ModuleArchive* archive, const char* file_path, cons
         size_t size = ftell(f);
         fseek(f, 0, SEEK_SET);
         
-        uint8_t* data = malloc(size);
+        uint8_t* data = MODULES_ALLOC(size);
         size_t read = fread(data, 1, size, f);
         fclose(f);
         
         if (read != size) {
-            free(data);
+            MODULES_FREE(data, size);
             return false;
         }
         
         add_entry(archive, archive_path, 0, data, size);
-        free(data);
+        MODULES_FREE(data, size);
         
         return true;
     }
@@ -238,8 +269,11 @@ bool module_archive_write(ModuleArchive* archive) {
 }
 
 ModuleArchive* module_archive_open(const char* path) {
-    ModuleArchive* archive = calloc(1, sizeof(ModuleArchive));
-    archive->path = strdup(path);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    ModuleArchive* archive = MODULES_NEW_ZERO(ModuleArchive);
+    archive->path = STRINGS_STRDUP(path);
     archive->write_mode = false;
     
     // Detect format
@@ -249,8 +283,9 @@ ModuleArchive* module_archive_open(const char* path) {
         // Initialize ZIP reader
         memset(&archive->zip_archive, 0, sizeof(archive->zip_archive));
         if (!mz_zip_reader_init_file(&archive->zip_archive, path, 0)) {
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         archive->zip_initialized = true;
@@ -262,8 +297,9 @@ ModuleArchive* module_archive_open(const char* path) {
         
         FILE* f = fopen(path, "rb");
         if (!f) {
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         
@@ -271,24 +307,27 @@ ModuleArchive* module_archive_open(const char* path) {
         char magic[8];
         if (fread(magic, 1, 8, f) != 8 || memcmp(magic, ARCHIVE_MAGIC, 8) != 0) {
             fclose(f);
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         
         uint32_t version;
         if (fread(&version, sizeof(uint32_t), 1, f) != 1 || version != ARCHIVE_VERSION) {
             fclose(f);
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         
         uint32_t count;
         if (fread(&count, sizeof(uint32_t), 1, f) != 1) {
             fclose(f);
-            free(archive->path);
-            free(archive);
+            size_t path_len = strlen(archive->path) + 1;
+            STRINGS_FREE(archive->path, path_len);
+            MODULES_FREE(archive, sizeof(ModuleArchive));
             return NULL;
         }
         
@@ -297,7 +336,7 @@ ModuleArchive* module_archive_open(const char* path) {
         // Read entry table
         archive->entries.count = count;
         archive->entries.capacity = count;
-        archive->entries.entries = calloc(count, sizeof(ArchiveEntry));
+        archive->entries.entries = MODULES_NEW_ARRAY_ZERO(ArchiveEntry, count);
         
         if (fread(archive->entries.entries, sizeof(ArchiveEntry), count, f) != count) {
             module_archive_destroy(archive);
@@ -320,6 +359,8 @@ static ArchiveEntry* find_entry(ModuleArchive* archive, const char* name) {
 bool module_archive_extract_json(ModuleArchive* archive, char** json_content, size_t* size) {
     if (!archive || archive->write_mode) return false;
     
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     if (archive->format == ARCHIVE_FORMAT_ZIP) {
         // Extract from ZIP
         size_t uncomp_size;
@@ -327,7 +368,7 @@ bool module_archive_extract_json(ModuleArchive* archive, char** json_content, si
         if (!data) return false;
         
         *size = uncomp_size;
-        *json_content = malloc(uncomp_size + 1);
+        *json_content = STRINGS_ALLOC(uncomp_size + 1);
         memcpy(*json_content, data, uncomp_size);
         (*json_content)[uncomp_size] = '\0';
         mz_free(data);
@@ -338,11 +379,11 @@ bool module_archive_extract_json(ModuleArchive* archive, char** json_content, si
         if (!entry) return false;
         
         *size = entry->size;
-        *json_content = malloc(entry->size + 1);
+        *json_content = STRINGS_ALLOC(entry->size + 1);
         
         fseek(archive->file, entry->offset, SEEK_SET);
         if (fread(*json_content, 1, entry->size, archive->file) != entry->size) {
-            free(*json_content);
+            STRINGS_FREE(*json_content, entry->size + 1);
             return false;
         }
         
@@ -354,6 +395,8 @@ bool module_archive_extract_json(ModuleArchive* archive, char** json_content, si
 bool module_archive_extract_bytecode(ModuleArchive* archive, const char* module_name, uint8_t** bytecode, size_t* size) {
     if (!archive || archive->write_mode) return false;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     char path[512];
     snprintf(path, sizeof(path), "bytecode/%s.swiftbc", module_name);
     
@@ -364,7 +407,7 @@ bool module_archive_extract_bytecode(ModuleArchive* archive, const char* module_
         if (!data) return false;
         
         *size = uncomp_size;
-        *bytecode = malloc(uncomp_size);
+        *bytecode = MODULES_ALLOC(uncomp_size);
         memcpy(*bytecode, data, uncomp_size);
         mz_free(data);
         return true;
@@ -374,11 +417,11 @@ bool module_archive_extract_bytecode(ModuleArchive* archive, const char* module_
         if (!entry) return false;
         
         *size = entry->size;
-        *bytecode = malloc(entry->size);
+        *bytecode = MODULES_ALLOC(entry->size);
         
         fseek(archive->file, entry->offset, SEEK_SET);
         if (fread(*bytecode, 1, entry->size, archive->file) != entry->size) {
-            free(*bytecode);
+            MODULES_FREE(*bytecode, entry->size);
             return false;
         }
         
@@ -388,6 +431,8 @@ bool module_archive_extract_bytecode(ModuleArchive* archive, const char* module_
 
 bool module_archive_extract_native_lib(ModuleArchive* archive, const char* platform, const char* output_path) {
     if (!archive || archive->write_mode) return false;
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     
     // Find native library for platform
     char prefix[256];
@@ -418,16 +463,16 @@ bool module_archive_extract_native_lib(ModuleArchive* archive, const char* platf
                 FILE* out = fopen(output_path, "wb");
                 if (!out) return false;
                 
-                uint8_t* data = malloc(entry->size);
+                uint8_t* data = MODULES_ALLOC(entry->size);
                 fseek(archive->file, entry->offset, SEEK_SET);
                 if (fread(data, 1, entry->size, archive->file) != entry->size) {
-                    free(data);
+                    MODULES_FREE(data, entry->size);
                     fclose(out);
                     return false;
                 }
                 
                 fwrite(data, 1, entry->size, out);
-                free(data);
+                MODULES_FREE(data, entry->size);
                 fclose(out);
                 
                 // Make executable

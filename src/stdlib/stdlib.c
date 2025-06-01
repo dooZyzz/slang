@@ -1,8 +1,8 @@
 #include "stdlib/stdlib.h"
 #include "runtime/modules/extensions/module_inspect.h"
+#include "utils/allocators.h"
 #include <string.h>
 #include <ctype.h>
-#include <stdlib.h>
 #include <stdio.h>
 
 // Helper to check if a value is truthy
@@ -42,11 +42,12 @@ static TaggedValue object_toString_method(int arg_count, TaggedValue* args) {
     if (arg_count < 1) return NIL_VAL;
     
     TaggedValue self = args[0];
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     if (IS_NIL(self)) {
-        return STRING_VAL("nil");
+        return STRING_VAL(MEM_STRDUP(str_alloc, "nil"));
     } else if (IS_BOOL(self)) {
-        return STRING_VAL(AS_BOOL(self) ? "true" : "false");
+        return STRING_VAL(MEM_STRDUP(str_alloc, AS_BOOL(self) ? "true" : "false"));
     } else if (IS_NUMBER(self)) {
         char buffer[32];
         double num = AS_NUMBER(self);
@@ -55,22 +56,22 @@ static TaggedValue object_toString_method(int arg_count, TaggedValue* args) {
         } else {
             snprintf(buffer, sizeof(buffer), "%.14g", num);
         }
-        return STRING_VAL(strdup(buffer));
+        return STRING_VAL(MEM_STRDUP(str_alloc, buffer));
     } else if (IS_STRING(self)) {
         return self; // Strings return themselves
     } else if (IS_OBJECT(self)) {
         Object* obj = AS_OBJECT(self);
         if (obj->is_array) {
             // For arrays, create a string representation
-            return STRING_VAL("[Array]");
+            return STRING_VAL(MEM_STRDUP(str_alloc, "[Array]"));
         } else {
-            return STRING_VAL("[Object]");
+            return STRING_VAL(MEM_STRDUP(str_alloc, "[Object]"));
         }
     } else if (IS_FUNCTION(self) || IS_CLOSURE(self) || IS_NATIVE(self)) {
-        return STRING_VAL("[Function]");
+        return STRING_VAL(MEM_STRDUP(str_alloc, "[Function]"));
     }
     
-    return STRING_VAL("[Unknown]");
+    return STRING_VAL(MEM_STRDUP(str_alloc, "[Unknown]"));
 }
 
 static TaggedValue object_valueOf_method(int arg_count, TaggedValue* args) {
@@ -153,14 +154,21 @@ static TaggedValue function_call_method(int arg_count, TaggedValue* args) {
     int func_arg_count = arg_count - 2;  // Exclude function and 'this'
     TaggedValue* func_args = NULL;
     
+    // Use VM allocator for temporary function arguments
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
+    
     if (func_arg_count > 0) {
-        func_args = malloc(sizeof(TaggedValue) * (func_arg_count + 1));
+        func_args = MEM_ALLOC(vm_alloc, sizeof(TaggedValue) * (func_arg_count + 1));
+        if (!func_args) return NIL_VAL;
+        
         func_args[0] = this_arg;  // 'this' is always the first argument
         for (int i = 0; i < func_arg_count; i++) {
             func_args[i + 1] = args[i + 2];
         }
     } else {
-        func_args = malloc(sizeof(TaggedValue));
+        func_args = MEM_ALLOC(vm_alloc, sizeof(TaggedValue));
+        if (!func_args) return NIL_VAL;
+        
         func_args[0] = this_arg;
         func_arg_count = 0;
     }
@@ -176,7 +184,7 @@ static TaggedValue function_call_method(int arg_count, TaggedValue* args) {
         result = NIL_VAL;
     }
     
-    free(func_args);
+    MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
     return result;
 }
 
@@ -194,12 +202,15 @@ static TaggedValue function_apply_method(int arg_count, TaggedValue* args) {
     // Get arguments from array
     int func_arg_count = 0;
     TaggedValue* func_args = NULL;
+    Allocator* vm_alloc = allocators_get(ALLOC_SYSTEM_VM);
     
     if (arg_count >= 3 && IS_OBJECT(args[2])) {
         Object* arg_array = AS_OBJECT(args[2]);
         if (arg_array->is_array) {
             func_arg_count = (int)array_length(arg_array);
-            func_args = malloc(sizeof(TaggedValue) * (func_arg_count + 1));
+            func_args = MEM_ALLOC(vm_alloc, sizeof(TaggedValue) * (func_arg_count + 1));
+            if (!func_args) return NIL_VAL;
+            
             func_args[0] = this_arg;  // 'this' is always the first argument
             
             for (int i = 0; i < func_arg_count; i++) {
@@ -209,7 +220,9 @@ static TaggedValue function_apply_method(int arg_count, TaggedValue* args) {
     }
     
     if (func_args == NULL) {
-        func_args = malloc(sizeof(TaggedValue));
+        func_args = MEM_ALLOC(vm_alloc, sizeof(TaggedValue));
+        if (!func_args) return NIL_VAL;
+        
         func_args[0] = this_arg;
         func_arg_count = 0;
     }
@@ -224,7 +237,7 @@ static TaggedValue function_apply_method(int arg_count, TaggedValue* args) {
         result = NIL_VAL;
     }
     
-    free(func_args);
+    MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
     return result;
 }
 
@@ -450,11 +463,13 @@ TaggedValue string_charAt_method(int arg_count, TaggedValue* args) {
     int index = (int)AS_NUMBER(args[1]);
     
     if (index < 0 || index >= (int)strlen(str)) {
-        return STRING_VAL(strdup(""));
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRING_VAL(MEM_STRDUP(str_alloc, ""));
     }
     
     char result[2] = { str[index], '\0' };
-    return STRING_VAL(strdup(result));
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    return STRING_VAL(MEM_STRDUP(str_alloc, result));
 }
 
 TaggedValue string_indexOf_method(int arg_count, TaggedValue* args) {
@@ -479,7 +494,10 @@ TaggedValue string_substring_method(int arg_count, TaggedValue* args) {
     int len = strlen(str);
     
     if (start < 0) start = 0;
-    if (start >= len) return STRING_VAL(strdup(""));
+    if (start >= len) {
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+        return STRING_VAL(MEM_STRDUP(str_alloc, ""));
+    }
     
     int end = len;
     if (arg_count >= 3 && IS_NUMBER(args[2])) {
@@ -489,9 +507,12 @@ TaggedValue string_substring_method(int arg_count, TaggedValue* args) {
     }
     
     int result_len = end - start;
-    char* result = malloc(result_len + 1);
-    memcpy(result, str + start, result_len);
-    result[result_len] = '\0';
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_ALLOC(str_alloc, result_len + 1);
+    if (result) {
+        memcpy(result, str + start, result_len);
+        result[result_len] = '\0';
+    }
     
     return STRING_VAL(result);
 }
@@ -500,10 +521,13 @@ TaggedValue string_toUpperCase_method(int arg_count, TaggedValue* args) {
     if (arg_count < 1 || !IS_STRING(args[0])) return NIL_VAL;
     
     const char* str = AS_STRING(args[0]);
-    char* result = strdup(str);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_STRDUP(str_alloc, str);
     
-    for (char* p = result; *p; p++) {
-        *p = toupper((unsigned char)*p);
+    if (result) {
+        for (char* p = result; *p; p++) {
+            *p = toupper((unsigned char)*p);
+        }
     }
     
     return STRING_VAL(result);
@@ -513,10 +537,13 @@ TaggedValue string_toLowerCase_method(int arg_count, TaggedValue* args) {
     if (arg_count < 1 || !IS_STRING(args[0])) return NIL_VAL;
     
     const char* str = AS_STRING(args[0]);
-    char* result = strdup(str);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_STRDUP(str_alloc, str);
     
-    for (char* p = result; *p; p++) {
-        *p = tolower((unsigned char)*p);
+    if (result) {
+        for (char* p = result; *p; p++) {
+            *p = tolower((unsigned char)*p);
+        }
     }
     
     return STRING_VAL(result);
@@ -533,6 +560,7 @@ TaggedValue string_split_method(int arg_count, TaggedValue* args) {
     }
     
     Object* result = array_create();
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     // Empty delimiter = split each character
     if (strlen(delimiter) == 0) {
@@ -540,21 +568,23 @@ TaggedValue string_split_method(int arg_count, TaggedValue* args) {
             char char_str[2];
             char_str[0] = *p;
             char_str[1] = '\0';
-            array_push(result, STRING_VAL(char_str));
+            array_push(result, STRING_VAL(MEM_STRDUP(str_alloc, char_str)));
         }
         return OBJECT_VAL(result);
     }
     
     // Make a copy to tokenize
-    char* str_copy = strdup(str);
+    char* str_copy = MEM_STRDUP(str_alloc, str);
+    if (!str_copy) return OBJECT_VAL(result);
+    
     char* token = strtok(str_copy, delimiter);
     
     while (token != NULL) {
-        array_push(result, STRING_VAL(strdup(token)));
+        array_push(result, STRING_VAL(MEM_STRDUP(str_alloc, token)));
         token = strtok(NULL, delimiter);
     }
     
-    free(str_copy);
+    MEM_FREE(str_alloc, str_copy, strlen(str) + 1);
     return OBJECT_VAL(result);
 }
 
@@ -577,9 +607,12 @@ TaggedValue string_trim_method(int arg_count, TaggedValue* args) {
     
     // Create trimmed string
     size_t len = end - start + 1;
-    char* result = malloc(len + 1);
-    memcpy(result, start, len);
-    result[len] = '\0';
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    char* result = MEM_ALLOC(str_alloc, len + 1);
+    if (result) {
+        memcpy(result, start, len);
+        result[len] = '\0';
+    }
     
     return STRING_VAL(result);
 }

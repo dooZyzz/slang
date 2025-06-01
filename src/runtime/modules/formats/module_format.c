@@ -1,5 +1,6 @@
 #include "runtime/modules/formats/module_format.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
+#include "runtime/modules/module_allocator_macros.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -56,18 +57,21 @@ struct ModuleWriter {
 };
 
 ModuleWriter* module_writer_create(const char* path) {
-    ModuleWriter* writer = calloc(1, sizeof(ModuleWriter));
-    writer->path = strdup(path);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    ModuleWriter* writer = MODULES_NEW_ZERO(ModuleWriter);
+    writer->path = STRINGS_STRDUP(path);
     writer->file = fopen(path, "wb");
     
     if (!writer->file) {
-        free(writer->path);
-        free(writer);
+        STRINGS_FREE(writer->path, strlen(writer->path) + 1);
+        MODULES_FREE(writer, sizeof(ModuleWriter));
         return NULL;
     }
     
     writer->section_capacity = 8;
-    writer->sections = calloc(writer->section_capacity, sizeof(Section));
+    writer->sections = MODULES_NEW_ARRAY_ZERO(Section, writer->section_capacity);
     
     // Reserve space for header
     writer->current_offset = sizeof(ModuleHeader);
@@ -79,34 +83,51 @@ ModuleWriter* module_writer_create(const char* path) {
 void module_writer_destroy(ModuleWriter* writer) {
     if (!writer) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Free sections
     for (size_t i = 0; i < writer->section_count; i++) {
-        free(writer->sections[i].data);
+        if (writer->sections[i].data) {
+            MODULES_FREE(writer->sections[i].data, writer->sections[i].size);
+        }
     }
-    free(writer->sections);
+    MODULES_FREE(writer->sections, writer->section_capacity * sizeof(Section));
     
-    free(writer->module_name);
-    free(writer->module_version);
-    free(writer->path);
+    if (writer->module_name) {
+        STRINGS_FREE(writer->module_name, strlen(writer->module_name) + 1);
+    }
+    if (writer->module_version) {
+        STRINGS_FREE(writer->module_version, strlen(writer->module_version) + 1);
+    }
+    if (writer->path) {
+        STRINGS_FREE(writer->path, strlen(writer->path) + 1);
+    }
     
     if (writer->file) {
         fclose(writer->file);
     }
     
-    free(writer);
+    MODULES_FREE(writer, sizeof(ModuleWriter));
 }
 
 static void writer_add_section(ModuleWriter* writer, ModuleSectionType type, 
                               const void* data, size_t size) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     if (writer->section_count >= writer->section_capacity) {
+        size_t old_capacity = writer->section_capacity;
         writer->section_capacity *= 2;
-        writer->sections = realloc(writer->sections, 
-                                  writer->section_capacity * sizeof(Section));
+        
+        Section* new_sections = MODULES_NEW_ARRAY(Section, writer->section_capacity);
+        memcpy(new_sections, writer->sections, old_capacity * sizeof(Section));
+        MODULES_FREE(writer->sections, old_capacity * sizeof(Section));
+        writer->sections = new_sections;
     }
     
     Section* section = &writer->sections[writer->section_count++];
     section->type = type;
-    section->data = malloc(size);
+    section->data = MODULES_ALLOC(size);
     memcpy(section->data, data, size);
     section->size = size;
     
@@ -116,15 +137,18 @@ static void writer_add_section(ModuleWriter* writer, ModuleSectionType type,
 }
 
 bool module_writer_add_metadata(ModuleWriter* writer, const char* name, const char* version) {
-    writer->module_name = strdup(name);
-    writer->module_version = strdup(version);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    writer->module_name = STRINGS_STRDUP(name);
+    writer->module_version = STRINGS_STRDUP(version);
     
     // Create metadata section
     size_t name_len = strlen(name) + 1;
     size_t version_len = strlen(version) + 1;
     size_t metadata_size = 4 + name_len + 4 + version_len;
     
-    uint8_t* metadata = malloc(metadata_size);
+    uint8_t* metadata = MODULES_ALLOC(metadata_size);
     size_t offset = 0;
     
     // Write name length and name
@@ -139,18 +163,20 @@ bool module_writer_add_metadata(ModuleWriter* writer, const char* name, const ch
     memcpy(metadata + offset, version, version_len);
     
     writer_add_section(writer, SECTION_METADATA, metadata, metadata_size);
-    free(metadata);
+    MODULES_FREE(metadata, metadata_size);
     
     return true;
 }
 
 bool module_writer_add_export(ModuleWriter* writer, const char* name, uint8_t type, 
                              uint32_t offset, const char* signature) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     size_t name_len = strlen(name) + 1;
     size_t sig_len = signature ? strlen(signature) + 1 : 1;
     size_t export_size = 4 + name_len + 1 + 4 + 4 + sig_len;
     
-    uint8_t* export_data = malloc(export_size);
+    uint8_t* export_data = MODULES_ALLOC(export_size);
     size_t pos = 0;
     
     // Write name
@@ -176,7 +202,7 @@ bool module_writer_add_export(ModuleWriter* writer, const char* name, uint8_t ty
     }
     
     writer_add_section(writer, SECTION_EXPORTS, export_data, export_size);
-    free(export_data);
+    MODULES_FREE(export_data, export_size);
     
     return true;
 }
@@ -188,12 +214,14 @@ bool module_writer_add_bytecode(ModuleWriter* writer, const uint8_t* code, size_
 
 bool module_writer_add_native_binding(ModuleWriter* writer, const char* export_name,
                                      const char* native_name, const char* signature) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     size_t export_len = strlen(export_name) + 1;
     size_t native_len = strlen(native_name) + 1;
     size_t sig_len = signature ? strlen(signature) + 1 : 1;
     size_t binding_size = 4 + export_len + 4 + native_len + 4 + sig_len;
     
-    uint8_t* binding_data = malloc(binding_size);
+    uint8_t* binding_data = MODULES_ALLOC(binding_size);
     size_t pos = 0;
     
     // Write export name
@@ -218,7 +246,7 @@ bool module_writer_add_native_binding(ModuleWriter* writer, const char* export_n
     }
     
     writer_add_section(writer, SECTION_NATIVES, binding_data, binding_size);
-    free(binding_data);
+    MODULES_FREE(binding_data, binding_size);
     
     return true;
 }
@@ -226,12 +254,11 @@ bool module_writer_add_native_binding(ModuleWriter* writer, const char* export_n
 bool module_writer_finalize(ModuleWriter* writer) {
     if (!writer->file) return false;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    
     // Add end section
     uint8_t end_marker = 0;
     writer_add_section(writer, SECTION_END, &end_marker, 1);
-    
-    // Calculate total size
-    // fprintf(stderr, "Finalizing module with %zu sections, total size: %zu\n", writer->section_count, total_size);
     
     // Rewind to write header
     fseek(writer->file, 0, SEEK_SET);
@@ -270,7 +297,7 @@ bool module_writer_finalize(ModuleWriter* writer) {
     
     // Calculate checksum
     fseek(writer->file, 0, SEEK_SET);
-    uint8_t* file_data = malloc(actual_file_size);
+    uint8_t* file_data = MODULES_ALLOC(actual_file_size);
     fread(file_data, 1, actual_file_size, writer->file);
     
     // Zero out checksum field for calculation
@@ -284,7 +311,7 @@ bool module_writer_finalize(ModuleWriter* writer) {
     // Ensure everything is written
     fflush(writer->file);
     
-    free(file_data);
+    MODULES_FREE(file_data, actual_file_size);
     fclose(writer->file);
     writer->file = NULL;
     
@@ -317,12 +344,15 @@ struct ModuleReader {
 };
 
 ModuleReader* module_reader_create(const char* path) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     FILE* file = fopen(path, "rb");
     if (!file) return NULL;
     
-    ModuleReader* reader = calloc(1, sizeof(ModuleReader));
+    ModuleReader* reader = MODULES_NEW_ZERO(ModuleReader);
     reader->file = file;
-    reader->path = strdup(path);
+    reader->path = STRINGS_STRDUP(path);
     
     // Read header
     if (fread(&reader->header, sizeof(ModuleHeader), 1, file) != 1) {
@@ -337,7 +367,7 @@ ModuleReader* module_reader_create(const char* path) {
     }
     
     // Read section headers
-    reader->sections = calloc(reader->header.section_count, sizeof(SectionHeader));
+    reader->sections = MODULES_NEW_ARRAY_ZERO(SectionHeader, reader->header.section_count);
     if (fread(reader->sections, sizeof(SectionHeader), reader->header.section_count, file) 
         != reader->header.section_count) {
         module_reader_destroy(reader);
@@ -347,7 +377,6 @@ ModuleReader* module_reader_create(const char* path) {
     // Parse sections
     for (uint32_t i = 0; i < reader->header.section_count; i++) {
         SectionHeader* shdr = &reader->sections[i];
-        // fprintf(stderr, "Section %u: type=%u, size=%u, offset=%u\n", i, shdr->type, shdr->size, shdr->offset);
         
         switch (shdr->type) {
             case SECTION_METADATA: {
@@ -356,14 +385,13 @@ ModuleReader* module_reader_create(const char* path) {
                 // Read name
                 uint32_t name_len;
                 fread(&name_len, sizeof(name_len), 1, file);
-                reader->module_name = malloc(name_len);
+                reader->module_name = STRINGS_ALLOC(name_len);
                 fread(reader->module_name, 1, name_len, file);
-                // fprintf(stderr, "Read module name: '%s' (len=%u) at offset %ld\n", reader->module_name, name_len, ftell(file));
                 
                 // Read version
                 uint32_t version_len;
                 fread(&version_len, sizeof(version_len), 1, file);
-                reader->module_version = malloc(version_len);
+                reader->module_version = STRINGS_ALLOC(version_len);
                 fread(reader->module_version, 1, version_len, file);
                 break;
             }
@@ -373,15 +401,21 @@ ModuleReader* module_reader_create(const char* path) {
                 
                 // Count exports (simplified - in production, parse properly)
                 reader->export_count = 1;  // For now, assume one export per section
-                reader->exports = realloc(reader->exports, 
-                                        (reader->export_count) * sizeof(ExportEntry));
+                size_t old_count = reader->export_count - 1;
+                
+                ExportEntry* new_exports = MODULES_NEW_ARRAY(ExportEntry, reader->export_count);
+                if (reader->exports) {
+                    memcpy(new_exports, reader->exports, old_count * sizeof(ExportEntry));
+                    MODULES_FREE(reader->exports, old_count * sizeof(ExportEntry));
+                }
+                reader->exports = new_exports;
                 
                 ExportEntry* export = &reader->exports[reader->export_count - 1];
                 
                 // Read name
                 uint32_t name_len;
                 fread(&name_len, sizeof(name_len), 1, file);
-                export->name = malloc(name_len);
+                export->name = STRINGS_ALLOC(name_len);
                 fread(export->name, 1, name_len, file);
                 
                 // Read type
@@ -393,14 +427,14 @@ ModuleReader* module_reader_create(const char* path) {
                 // Read signature
                 uint32_t sig_len;
                 fread(&sig_len, sizeof(sig_len), 1, file);
-                export->signature = malloc(sig_len);
+                export->signature = STRINGS_ALLOC(sig_len);
                 fread(export->signature, 1, sig_len, file);
                 break;
             }
             
             case SECTION_BYTECODE: {
                 reader->bytecode_size = shdr->size;
-                reader->bytecode = malloc(reader->bytecode_size);
+                reader->bytecode = MODULES_ALLOC(reader->bytecode_size);
                 fseek(file, shdr->offset, SEEK_SET);
                 fread(reader->bytecode, 1, reader->bytecode_size, file);
                 break;
@@ -410,27 +444,33 @@ ModuleReader* module_reader_create(const char* path) {
                 fseek(file, shdr->offset, SEEK_SET);
                 
                 reader->native_binding_count++;
-                reader->native_bindings = realloc(reader->native_bindings,
-                                                reader->native_binding_count * sizeof(NativeBinding));
+                size_t old_count = reader->native_binding_count - 1;
+                
+                NativeBinding* new_bindings = MODULES_NEW_ARRAY(NativeBinding, reader->native_binding_count);
+                if (reader->native_bindings) {
+                    memcpy(new_bindings, reader->native_bindings, old_count * sizeof(NativeBinding));
+                    MODULES_FREE(reader->native_bindings, old_count * sizeof(NativeBinding));
+                }
+                reader->native_bindings = new_bindings;
                 
                 NativeBinding* binding = &reader->native_bindings[reader->native_binding_count - 1];
                 
                 // Read export name
                 uint32_t export_len;
                 fread(&export_len, sizeof(export_len), 1, file);
-                binding->export_name = malloc(export_len);
+                binding->export_name = STRINGS_ALLOC(export_len);
                 fread(binding->export_name, 1, export_len, file);
                 
                 // Read native name
                 uint32_t native_len;
                 fread(&native_len, sizeof(native_len), 1, file);
-                binding->native_name = malloc(native_len);
+                binding->native_name = STRINGS_ALLOC(native_len);
                 fread(binding->native_name, 1, native_len, file);
                 
                 // Read signature
                 uint32_t sig_len;
                 fread(&sig_len, sizeof(sig_len), 1, file);
-                binding->signature = malloc(sig_len);
+                binding->signature = STRINGS_ALLOC(sig_len);
                 fread(binding->signature, 1, sig_len, file);
                 break;
             }
@@ -443,44 +483,82 @@ ModuleReader* module_reader_create(const char* path) {
 void module_reader_destroy(ModuleReader* reader) {
     if (!reader) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     if (reader->file) {
         fclose(reader->file);
     }
     
-    free(reader->path);
-    free(reader->sections);
-    free(reader->module_name);
-    free(reader->module_version);
+    if (reader->path) {
+        STRINGS_FREE(reader->path, strlen(reader->path) + 1);
+    }
+    if (reader->sections) {
+        MODULES_FREE(reader->sections, reader->header.section_count * sizeof(SectionHeader));
+    }
+    if (reader->module_name) {
+        STRINGS_FREE(reader->module_name, strlen(reader->module_name) + 1);
+    }
+    if (reader->module_version) {
+        STRINGS_FREE(reader->module_version, strlen(reader->module_version) + 1);
+    }
     
     // Free exports
     for (size_t i = 0; i < reader->export_count; i++) {
-        free(reader->exports[i].name);
-        free(reader->exports[i].signature);
+        if (reader->exports[i].name) {
+            STRINGS_FREE(reader->exports[i].name, strlen(reader->exports[i].name) + 1);
+        }
+        if (reader->exports[i].signature) {
+            STRINGS_FREE(reader->exports[i].signature, strlen(reader->exports[i].signature) + 1);
+        }
     }
-    free(reader->exports);
+    if (reader->exports) {
+        MODULES_FREE(reader->exports, reader->export_count * sizeof(ExportEntry));
+    }
     
     // Free imports
     for (size_t i = 0; i < reader->import_count; i++) {
-        free(reader->imports[i].module_name);
-        free(reader->imports[i].import_name);
-        free(reader->imports[i].alias);
+        if (reader->imports[i].module_name) {
+            STRINGS_FREE(reader->imports[i].module_name, strlen(reader->imports[i].module_name) + 1);
+        }
+        if (reader->imports[i].import_name) {
+            STRINGS_FREE(reader->imports[i].import_name, strlen(reader->imports[i].import_name) + 1);
+        }
+        if (reader->imports[i].alias) {
+            STRINGS_FREE(reader->imports[i].alias, strlen(reader->imports[i].alias) + 1);
+        }
     }
-    free(reader->imports);
+    if (reader->imports) {
+        MODULES_FREE(reader->imports, reader->import_count * sizeof(ImportEntry));
+    }
     
     // Free native bindings
     for (size_t i = 0; i < reader->native_binding_count; i++) {
-        free(reader->native_bindings[i].export_name);
-        free(reader->native_bindings[i].native_name);
-        free(reader->native_bindings[i].signature);
+        if (reader->native_bindings[i].export_name) {
+            STRINGS_FREE(reader->native_bindings[i].export_name, strlen(reader->native_bindings[i].export_name) + 1);
+        }
+        if (reader->native_bindings[i].native_name) {
+            STRINGS_FREE(reader->native_bindings[i].native_name, strlen(reader->native_bindings[i].native_name) + 1);
+        }
+        if (reader->native_bindings[i].signature) {
+            STRINGS_FREE(reader->native_bindings[i].signature, strlen(reader->native_bindings[i].signature) + 1);
+        }
     }
-    free(reader->native_bindings);
+    if (reader->native_bindings) {
+        MODULES_FREE(reader->native_bindings, reader->native_binding_count * sizeof(NativeBinding));
+    }
     
-    free(reader->bytecode);
-    free(reader);
+    if (reader->bytecode) {
+        MODULES_FREE(reader->bytecode, reader->bytecode_size);
+    }
+    
+    MODULES_FREE(reader, sizeof(ModuleReader));
 }
 
 bool module_reader_verify(ModuleReader* reader) {
     if (!reader || !reader->file) return false;
+    
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     
     // Save current position
     long current_pos = ftell(reader->file);
@@ -491,7 +569,7 @@ bool module_reader_verify(ModuleReader* reader) {
     fseek(reader->file, 0, SEEK_SET);
     
     // Read entire file
-    uint8_t* data = malloc(file_size);
+    uint8_t* data = MODULES_ALLOC(file_size);
     if (!data) {
         fseek(reader->file, current_pos, SEEK_SET);
         return false;
@@ -499,7 +577,7 @@ bool module_reader_verify(ModuleReader* reader) {
     
     size_t bytes_read = fread(data, 1, file_size, reader->file);
     if (bytes_read != file_size) {
-        free(data);
+        MODULES_FREE(data, file_size);
         fseek(reader->file, current_pos, SEEK_SET);
         return false;
     }
@@ -510,7 +588,7 @@ bool module_reader_verify(ModuleReader* reader) {
     
     // Calculate checksum
     uint32_t calculated_checksum = crc32(data, file_size);
-    free(data);
+    MODULES_FREE(data, file_size);
     
     // Restore file position
     fseek(reader->file, current_pos, SEEK_SET);

@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Platform-macOS%20|%20Linux-lightgrey.svg" alt="Platform">
 </p>
 
-A modern, expressive programming language that combines the best features of Swift, Kotlin, and JavaScript. Features a clean syntax, powerful module system, extension functions, and functional programming capabilities. Built with C for performance and portability.
+A modern, expressive programming language that combines the best features of Swift, Kotlin, and JavaScript. Features a clean syntax, powerful module system with package management, extension functions, native C interop, and functional programming capabilities. Built with C for performance and portability.
 
 ## ✨ Features
 
@@ -51,17 +51,27 @@ cmake ..
 make -j8
 
 # Run the REPL
-./swiftlang repl
+./swift_like_lang repl
 
 # Run a program
-./swiftlang run ../examples/01-basics/main.swift
+./swift_like_lang run ../examples/01-basics/main.swift
 
-# Build a project (creates .swiftmodule files)
-cd ../examples/02-modules
-../../cmake-build-debug/swiftlang build
+# Initialize a new module
+./swift_like_lang init myproject
+cd myproject
 
-# Run the project
-../../cmake-build-debug/swiftlang run
+# Add dependencies
+../swift_like_lang add time
+../swift_like_lang add math
+
+# Build the module (creates .swiftmodule)
+../swift_like_lang build
+
+# Bundle multiple modules
+../swift_like_lang bundle -o myapp.swb module1.swiftmodule module2.swiftmodule
+
+# Install a module
+../swift_like_lang install somemodule.swiftmodule
 ```
 
 ### Hello World
@@ -188,6 +198,49 @@ while count < 5 {
 }
 ```
 
+### Module System
+```swift
+// math_utils.swift
+export func add(a, b) {
+    return a + b
+}
+
+export func multiply(a, b) {
+    return a * b
+}
+
+// main.swift
+import { add, multiply } from "./math_utils"
+
+print(add(2, 3))        // 5
+print(multiply(4, 5))   // 20
+
+// Import everything
+import * as math from "./math_utils"
+print(math.add(1, 2))   // 3
+```
+
+### Native C Interop
+```swift
+// time/src/time_native.c
+double time_native_getCurrentTime() {
+    return (double)time(NULL);
+}
+
+// time/src/time.swift
+native func getCurrentTime() -> Number
+
+export func formatTime(timestamp) {
+    return "Time: $timestamp"
+}
+
+// main.swift
+import { getCurrentTime, formatTime } from "time"
+
+let now = getCurrentTime()
+print(formatTime(now))
+```
+
 ## 🏗️ Architecture
 
 The language is implemented in clean, modular C:
@@ -214,7 +267,7 @@ make test
 
 ## 📊 Implementation Status
 
-~45% Complete - Core language features are working!
+~75% Complete - Core language and module system fully operational!
 
 ### ✅ Implemented
 - Basic types (numbers, strings, booleans, arrays, objects)
@@ -223,17 +276,21 @@ make test
 - Control flow (if/else, while, for-in, for-loop)
 - Functions and closures with capture
 - Array methods (map, filter, reduce) with full closure support
-- String interpolation (including in closures)
+- String interpolation (Kotlin-style with `$var` and `${expr}`)
 - Prototype-based objects
 - Structs with fields and constructor syntax
 - Extension methods for structs (Kotlin-style)
 - Full closure support for struct properties and methods
+- Module system with multi-file support
+- Package management (init, bundle, install, publish)
+- Native C interop with automatic bindings
+- Memory-efficient custom allocator system
 - Garbage collection
 
 ### 🚧 In Progress
-- Module system (multi-file imports not working yet)
-- Type annotations
-- Class syntax
+- Type annotations and type checking
+- Class syntax with inheritance
+- Pattern matching for enums
 
 ### 📋 Planned
 - Enums and pattern matching

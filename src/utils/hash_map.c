@@ -1,5 +1,5 @@
 #include "utils/hash_map.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
 #include <string.h>
 
 #define INITIAL_CAPACITY 16
@@ -15,6 +15,7 @@ struct HashMap {
     HashMapEntry** buckets;
     size_t capacity;
     size_t size;
+    Allocator* allocator;  // Store allocator reference
 };
 
 static unsigned int hash(const char* key) {
@@ -26,53 +27,87 @@ static unsigned int hash(const char* key) {
     return hash;
 }
 
-HashMap* hash_map_create(void) {
-    HashMap* map = calloc(1, sizeof(HashMap));
+HashMap* hash_map_create_with_allocator(Allocator* allocator) {
+    if (!allocator) {
+        // Use default allocator if none provided
+        allocator = allocators_get(ALLOC_SYSTEM_VM);
+    }
+    
+    HashMap* map = MEM_NEW(allocator, HashMap);
     if (!map) return NULL;
     
+    map->allocator = allocator;
     map->capacity = INITIAL_CAPACITY;
-    map->buckets = calloc(map->capacity, sizeof(HashMapEntry*));
+    map->size = 0;
+    map->buckets = MEM_NEW_ARRAY(allocator, HashMapEntry*, map->capacity);
+    if (!map->buckets) {
+        MEM_FREE(allocator, map, sizeof(HashMap));
+        return NULL;
+    }
+    
+    // Initialize buckets to NULL
+    memset(map->buckets, 0, sizeof(HashMapEntry*) * map->capacity);
     
     return map;
 }
 
+HashMap* hash_map_create(void) {
+    return hash_map_create_with_allocator(NULL);
+}
+
 void hash_map_destroy(HashMap* map) {
     if (!map) return;
+    
+    Allocator* alloc = map->allocator;
     
     // Free all entries
     for (size_t i = 0; i < map->capacity; i++) {
         HashMapEntry* entry = map->buckets[i];
         while (entry) {
             HashMapEntry* next = entry->next;
-            free(entry->key);
-            free(entry);
+            MEM_FREE(alloc, entry->key, strlen(entry->key) + 1);
+            MEM_FREE(alloc, entry, sizeof(HashMapEntry));
             entry = next;
         }
     }
     
-    free(map->buckets);
-    free(map);
+    MEM_FREE(alloc, map->buckets, sizeof(HashMapEntry*) * map->capacity);
+    MEM_FREE(alloc, map, sizeof(HashMap));
 }
 
 static void resize(HashMap* map) {
-    size_t new_capacity = map->capacity * 2;
-    HashMapEntry** new_buckets = calloc(new_capacity, sizeof(HashMapEntry*));
+    size_t old_capacity = map->capacity;
+    HashMapEntry** old_buckets = map->buckets;
+    
+    map->capacity *= 2;
+    map->buckets = MEM_NEW_ARRAY(map->allocator, HashMapEntry*, map->capacity);
+    if (!map->buckets) {
+        // Restore old state on failure
+        map->buckets = old_buckets;
+        map->capacity = old_capacity;
+        return;
+    }
+    
+    // Initialize new buckets
+    memset(map->buckets, 0, sizeof(HashMapEntry*) * map->capacity);
     
     // Rehash all entries
-    for (size_t i = 0; i < map->capacity; i++) {
-        HashMapEntry* entry = map->buckets[i];
+    for (size_t i = 0; i < old_capacity; i++) {
+        HashMapEntry* entry = old_buckets[i];
         while (entry) {
             HashMapEntry* next = entry->next;
-            unsigned int index = hash(entry->key) % new_capacity;
-            entry->next = new_buckets[index];
-            new_buckets[index] = entry;
+            
+            // Insert into new bucket
+            unsigned int index = hash(entry->key) % map->capacity;
+            entry->next = map->buckets[index];
+            map->buckets[index] = entry;
+            
             entry = next;
         }
     }
     
-    free(map->buckets);
-    map->buckets = new_buckets;
-    map->capacity = new_capacity;
+    // Free old bucket array
+    MEM_FREE(map->allocator, old_buckets, sizeof(HashMapEntry*) * old_capacity);
 }
 
 void hash_map_put(HashMap* map, const char* key, void* value) {
@@ -84,11 +119,12 @@ void hash_map_put(HashMap* map, const char* key, void* value) {
     }
     
     unsigned int index = hash(key) % map->capacity;
-    HashMapEntry* entry = map->buckets[index];
     
     // Check if key already exists
+    HashMapEntry* entry = map->buckets[index];
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
+            // Update existing entry
             entry->value = value;
             return;
         }
@@ -96,11 +132,19 @@ void hash_map_put(HashMap* map, const char* key, void* value) {
     }
     
     // Create new entry
-    entry = malloc(sizeof(HashMapEntry));
-    entry->key = strdup(key);
+    entry = MEM_NEW(map->allocator, HashMapEntry);
+    if (!entry) return;
+    
+    entry->key = MEM_STRDUP(map->allocator, key);
+    if (!entry->key) {
+        MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
+        return;
+    }
+    
     entry->value = value;
     entry->next = map->buckets[index];
     map->buckets[index] = entry;
+    
     map->size++;
 }
 
@@ -120,48 +164,24 @@ void* hash_map_get(HashMap* map, const char* key) {
     return NULL;
 }
 
-bool hash_map_contains(HashMap* map, const char* key) {
-    return hash_map_get(map, key) != NULL;
-}
-
 void hash_map_remove(HashMap* map, const char* key) {
     if (!map || !key) return;
     
     unsigned int index = hash(key) % map->capacity;
+    HashMapEntry** prev = &map->buckets[index];
     HashMapEntry* entry = map->buckets[index];
-    HashMapEntry* prev = NULL;
     
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
-            if (prev) {
-                prev->next = entry->next;
-            } else {
-                map->buckets[index] = entry->next;
-            }
-            free(entry->key);
-            free(entry);
+            *prev = entry->next;
+            MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
+            MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
             map->size--;
             return;
         }
-        prev = entry;
+        prev = &entry->next;
         entry = entry->next;
     }
-}
-
-void hash_map_clear(HashMap* map) {
-    if (!map) return;
-    
-    for (size_t i = 0; i < map->capacity; i++) {
-        HashMapEntry* entry = map->buckets[i];
-        while (entry) {
-            HashMapEntry* next = entry->next;
-            free(entry->key);
-            free(entry);
-            entry = next;
-        }
-        map->buckets[i] = NULL;
-    }
-    map->size = 0;
 }
 
 void hash_map_iterate(HashMap* map, HashMapIterator iterator, void* user_data) {
@@ -180,6 +200,24 @@ size_t hash_map_size(HashMap* map) {
     return map ? map->size : 0;
 }
 
-bool hash_map_is_empty(HashMap* map) {
-    return !map || map->size == 0;
+bool hash_map_contains(HashMap* map, const char* key) {
+    return hash_map_get(map, key) != NULL;
+}
+
+void hash_map_clear(HashMap* map) {
+    if (!map) return;
+    
+    // Free all entries
+    for (size_t i = 0; i < map->capacity; i++) {
+        HashMapEntry* entry = map->buckets[i];
+        while (entry) {
+            HashMapEntry* next = entry->next;
+            MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
+            MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
+            entry = next;
+        }
+        map->buckets[i] = NULL;
+    }
+    
+    map->size = 0;
 }

@@ -1,11 +1,36 @@
 #include "parser/parser.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
+#include <string.h>
+
+// Helper function to duplicate token lexeme using parser allocator
+static char* parser_strdup_lexeme(const char* lexeme, size_t length)
+{
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+    char* result = MEM_ALLOC(alloc, length + 1);
+    if (result) {
+        memcpy(result, lexeme, length);
+        result[length] = '\0';
+    }
+    return result;
+}
+
+// Helper to free string allocated by parser
+static void parser_free_string(char* str)
+{
+    if (str) {
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+        MEM_FREE(alloc, str, strlen(str) + 1);
+    }
+}
+
+
+
 #include <stdio.h>
 #include <string.h>
 
 Parser* parser_create(const char* source)
 {
-    Parser* parser = malloc(sizeof(Parser));
+    Parser* parser = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Parser);
     if (!parser) return NULL;
 
     parser->lexer = lexer_create(source);
@@ -23,7 +48,8 @@ void parser_destroy(Parser* parser)
     if (parser)
     {
         lexer_destroy(parser->lexer);
-        free(parser);
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+        MEM_FREE(alloc, parser, sizeof(Parser));
     }
 }
 
@@ -177,7 +203,7 @@ static Expr* primary(Parser* parser)
     if (match(parser, TOKEN_STRING))
     {
         Expr* node = expr_create_literal_string(parser->previous.literal.string_value);
-        token_free(&parser->previous);
+        // Token string is handled by lexer, don't free here
         return node;
     }
     
@@ -188,14 +214,14 @@ static Expr* primary(Parser* parser)
         // "Hello, ${name}!" -> parts: ["Hello, ", "!"], expressions: [name]
         size_t part_capacity = 4;
         size_t expr_capacity = 4;
-        char** parts = malloc(part_capacity * sizeof(char*));
-        Expr** expressions = malloc(expr_capacity * sizeof(Expr*));
+        char** parts = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, part_capacity);
+        Expr** expressions = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Expr*, expr_capacity);
         size_t part_count = 0;
         size_t expr_count = 0;
         
         // Add first part (the string before the first interpolation)
-        parts[part_count++] = strdup(parser->previous.literal.string_value);
-        token_free(&parser->previous);
+        parts[part_count++] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
+        // Token string is handled by lexer, don't free here
         
         while (true) {
             // Parse the expression after $
@@ -208,16 +234,16 @@ static Expr* primary(Parser* parser)
             } else if (match(parser, TOKEN_DOLLAR_IDENT)) {
                 // $identifier form - shorthand for simple variables
                 // Extract the identifier part (skip the $)
-                char* ident = malloc(parser->previous.lexeme_length);
+                char* ident = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length);
                 memcpy(ident, parser->previous.lexeme + 1, parser->previous.lexeme_length - 1);
                 ident[parser->previous.lexeme_length - 1] = '\0';
                 
                 expr = expr_create_variable(ident);
-                free(ident);
+                MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), ident, parser->previous.lexeme_length);
             } else if (match(parser, TOKEN_IDENTIFIER)) {
                 // Simple identifier form (lexer now returns TOKEN_IDENTIFIER for $name)
                 expr = expr_create_variable(parser->previous.literal.string_value);
-                token_free(&parser->previous);
+                // Token string is handled by lexer, don't free here
             } else {
                 parser_error_at_current(parser, "Expect interpolation expression after string part.");
                 break;
@@ -226,8 +252,13 @@ static Expr* primary(Parser* parser)
             // Store the expression if we got one
             if (expr) {
                 if (expr_count >= expr_capacity) {
+                    size_t old_capacity = expr_capacity;
                     expr_capacity *= 2;
-                    expressions = realloc(expressions, expr_capacity * sizeof(Expr*));
+                    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                    Expr** new_expressions = MEM_ALLOC(alloc, expr_capacity * sizeof(Expr*));
+                    memcpy(new_expressions, expressions, old_capacity * sizeof(Expr*));
+                    MEM_FREE(alloc, expressions, old_capacity * sizeof(Expr*));
+                    expressions = new_expressions;
                 }
                 expressions[expr_count++] = expr;
             }
@@ -236,19 +267,29 @@ static Expr* primary(Parser* parser)
             if (match(parser, TOKEN_STRING_INTERP_MID)) {
                 // Middle part - more interpolations to come
                 if (part_count >= part_capacity) {
+                    size_t old_capacity = part_capacity;
                     part_capacity *= 2;
-                    parts = realloc(parts, part_capacity * sizeof(char*));
+                    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                    char** new_parts = MEM_ALLOC(alloc, part_capacity * sizeof(char*));
+                    memcpy(new_parts, parts, old_capacity * sizeof(char*));
+                    MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
+                    parts = new_parts;
                 }
-                parts[part_count++] = strdup(parser->previous.literal.string_value);
-                token_free(&parser->previous);
+                parts[part_count++] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
+                // Token string is handled by lexer, don't free here
             } else if (match(parser, TOKEN_STRING_INTERP_END)) {
                 // Final part - end of interpolated string
                 if (part_count >= part_capacity) {
+                    size_t old_capacity = part_capacity;
                     part_capacity *= 2;
-                    parts = realloc(parts, part_capacity * sizeof(char*));
+                    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                    char** new_parts = MEM_ALLOC(alloc, part_capacity * sizeof(char*));
+                    memcpy(new_parts, parts, old_capacity * sizeof(char*));
+                    MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
+                    parts = new_parts;
                 }
-                parts[part_count++] = strdup(parser->previous.literal.string_value);
-                token_free(&parser->previous);
+                parts[part_count++] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
+                // Token string is handled by lexer, don't free here
                 break;
             } else {
                 parser_error_at_current(parser, "Expect string continuation or end in interpolation.");
@@ -272,11 +313,11 @@ static Expr* primary(Parser* parser)
 
     if (match(parser, TOKEN_IDENTIFIER))
     {
-        char* name = malloc(parser->previous.lexeme_length + 1);
+        char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
         name[parser->previous.lexeme_length] = '\0';
         Expr* node = expr_create_variable(name);
-        free(name);
+        MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), name, parser->previous.lexeme_length + 1);
         return node;
     }
 
@@ -291,7 +332,7 @@ static Expr* primary(Parser* parser)
     {
         size_t capacity = 8;
         size_t count = 0;
-        Expr** elements = malloc(capacity * sizeof(Expr*));
+        Expr** elements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Expr*, capacity);
 
         if (!check(parser, TOKEN_RIGHT_BRACKET))
         {
@@ -299,8 +340,13 @@ static Expr* primary(Parser* parser)
             {
                 if (count >= capacity)
                 {
+                    size_t old_capacity = capacity;
                     capacity *= 2;
-                    elements = realloc(elements, capacity * sizeof(Expr*));
+                    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                    Expr** new_elements = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
+                    memcpy(new_elements, elements, old_capacity * sizeof(Expr*));
+                    MEM_FREE(alloc, elements, old_capacity * sizeof(Expr*));
+                    elements = new_elements;
                 }
                 elements[count++] = expression(parser);
             }
@@ -350,7 +396,7 @@ static Expr* primary(Parser* parser)
             if (check(parser, TOKEN_COLON)) {
                 // It's an object literal! Parse it properly
                 // We've already consumed the first key
-                char* first_key = malloc(first_token.lexeme_length + 1);
+                char* first_key = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), first_token.lexeme_length + 1);
                 memcpy(first_key, first_token.lexeme, first_token.lexeme_length);
                 first_key[first_token.lexeme_length] = '\0';
                 
@@ -360,37 +406,46 @@ static Expr* primary(Parser* parser)
                 // Parse remaining key-value pairs
                 size_t capacity = 8;
                 size_t count = 1;
-                const char** keys = malloc(capacity * sizeof(char*));
-                Expr** values = malloc(capacity * sizeof(Expr*));
+                const char** keys = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, capacity);
+                Expr** values = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Expr*, capacity);
                 keys[0] = first_key;
                 values[0] = first_value;
                 
                 while (match(parser, TOKEN_COMMA)) {
                     if (count >= capacity) {
+                        size_t old_capacity = capacity;
                         capacity *= 2;
-                        keys = realloc(keys, capacity * sizeof(char*));
-                        values = realloc(values, capacity * sizeof(Expr*));
+                        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                        const char** new_keys = MEM_ALLOC(alloc, capacity * sizeof(char*));
+                        Expr** new_values = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
+                        memcpy(new_keys, keys, old_capacity * sizeof(char*));
+                        memcpy(new_values, values, old_capacity * sizeof(Expr*));
+                        MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
+                        MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
+                        keys = new_keys;
+                        values = new_values;
                     }
                     
                     // Parse key
                     char* key;
                     if (match(parser, TOKEN_IDENTIFIER)) {
-                        key = malloc(parser->previous.lexeme_length + 1);
+                        key = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                         memcpy(key, parser->previous.lexeme, parser->previous.lexeme_length);
                         key[parser->previous.lexeme_length] = '\0';
                     } else if (match(parser, TOKEN_STRING)) {
                         size_t str_len = parser->previous.lexeme_length - 2;
-                        key = malloc(str_len + 1);
+                        key = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), str_len + 1);
                         memcpy(key, parser->previous.lexeme + 1, str_len);
                         key[str_len] = '\0';
                     } else {
                         parser_error_at_current(parser, "Expect property key.");
                         // Clean up
                         for (size_t i = 0; i < count; i++) {
-                            free((char*)keys[i]);
+                            parser_free_string((char*)keys[i]);
                         }
-                        free(keys);
-                        free(values);
+                        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                        MEM_FREE(alloc, keys, capacity * sizeof(char*));
+                        MEM_FREE(alloc, values, capacity * sizeof(Expr*));
                         return NULL;
                     }
                     
@@ -414,11 +469,11 @@ static Expr* primary(Parser* parser)
                     // Start collecting parameters
                     size_t param_capacity = 8;
                     size_t param_count = 1;
-                    const char** param_names = malloc(param_capacity * sizeof(char*));
-                    TypeExpr** param_types = malloc(param_capacity * sizeof(TypeExpr*));
+                    const char** param_names = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, param_capacity);
+                    TypeExpr** param_types = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), TypeExpr*, param_capacity);
                     
                     // Save the first parameter we already consumed
-                    char* first_param = malloc(first_token.lexeme_length + 1);
+                    char* first_param = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), first_token.lexeme_length + 1);
                     memcpy(first_param, first_token.lexeme, first_token.lexeme_length);
                     first_param[first_token.lexeme_length] = '\0';
                     param_names[0] = first_param;
@@ -428,18 +483,27 @@ static Expr* primary(Parser* parser)
                     while (match(parser, TOKEN_COMMA)) {
                         if (!match(parser, TOKEN_IDENTIFIER)) {
                             parser_error_at_current(parser, "Expect parameter name.");
-                            free(param_names);
-                            free(param_types);
+                            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                            MEM_FREE(alloc, param_names, param_capacity * sizeof(char*));
+                            MEM_FREE(alloc, param_types, param_capacity * sizeof(TypeExpr*));
                             return NULL;
                         }
                         
                         if (param_count >= param_capacity) {
+                            size_t old_capacity = param_capacity;
                             param_capacity *= 2;
-                            param_names = realloc(param_names, param_capacity * sizeof(char*));
-                            param_types = realloc(param_types, param_capacity * sizeof(TypeExpr*));
+                            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                            const char** new_param_names = MEM_ALLOC(alloc, param_capacity * sizeof(char*));
+                            TypeExpr** new_param_types = MEM_ALLOC(alloc, param_capacity * sizeof(TypeExpr*));
+                            memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
+                            memcpy(new_param_types, param_types, old_capacity * sizeof(TypeExpr*));
+                            MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                            MEM_FREE(alloc, param_types, old_capacity * sizeof(TypeExpr*));
+                            param_names = new_param_names;
+                            param_types = new_param_types;
                         }
                         
-                        char* param = malloc(parser->previous.lexeme_length + 1);
+                        char* param = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                         memcpy(param, parser->previous.lexeme, parser->previous.lexeme_length);
                         param[parser->previous.lexeme_length] = '\0';
                         param_names[param_count] = param;
@@ -467,14 +531,19 @@ static Expr* primary(Parser* parser)
                             // Create statement from expression
                             size_t stmt_capacity = 8;
                             size_t stmt_count = 1;
-                            Stmt** statements = malloc(stmt_capacity * sizeof(Stmt*));
+                            Stmt** statements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, stmt_capacity);
                             statements[0] = stmt_create_expression(expr);
                             
                             // Parse remaining statements
                             while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF)) {
                                 if (stmt_count >= stmt_capacity) {
+                                    size_t old_capacity = stmt_capacity;
                                     stmt_capacity *= 2;
-                                    statements = realloc(statements, stmt_capacity * sizeof(Stmt*));
+                                    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                                    Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
+                                    memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
+                                    MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                                    statements = new_statements;
                                 }
                                 statements[stmt_count++] = statement(parser);
                             }
@@ -503,7 +572,7 @@ static Expr* primary(Parser* parser)
                         } else if (parser->previous.type == TOKEN_DOT) {
                             // Member access
                             consume(parser, TOKEN_IDENTIFIER, "Expect property name after '.'.");
-                            char* member = malloc(parser->previous.lexeme_length + 1);
+                            char* member = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                             memcpy(member, parser->previous.lexeme, parser->previous.lexeme_length);
                             member[parser->previous.lexeme_length] = '\0';
                             first_expr = expr_create_member(first_expr, member);
@@ -518,7 +587,7 @@ static Expr* primary(Parser* parser)
                     // Now parse the rest of the closure body
                     size_t stmt_capacity = 8;
                     size_t stmt_count = 0;
-                    Stmt** statements = malloc(stmt_capacity * sizeof(Stmt*));
+                    Stmt** statements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, stmt_capacity);
                     
                     // Add the first expression as a statement
                     statements[stmt_count++] = stmt_create_expression(first_expr);
@@ -526,8 +595,13 @@ static Expr* primary(Parser* parser)
                     // Parse remaining statements
                     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF)) {
                         if (stmt_count >= stmt_capacity) {
+                            size_t old_capacity = stmt_capacity;
                             stmt_capacity *= 2;
-                            statements = realloc(statements, stmt_capacity * sizeof(Stmt*));
+                            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                            Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
+                            memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
+                            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                            statements = new_statements;
                         }
                         statements[stmt_count++] = statement(parser);
                     }
@@ -545,12 +619,17 @@ static Expr* primary(Parser* parser)
         // Parse as closure body
         size_t stmt_capacity = 8;
         size_t stmt_count = 0;
-        Stmt** statements = malloc(stmt_capacity * sizeof(Stmt*));
+        Stmt** statements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, stmt_capacity);
         
         while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF)) {
             if (stmt_count >= stmt_capacity) {
+                size_t old_capacity = stmt_capacity;
                 stmt_capacity *= 2;
-                statements = realloc(statements, stmt_capacity * sizeof(Stmt*));
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
+                memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
+                MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                statements = new_statements;
             }
             statements[stmt_count++] = statement(parser);
             
@@ -576,8 +655,8 @@ static Expr* parse_object_literal(Parser* parser)
 {
     size_t capacity = 8;
     size_t count = 0;
-    const char** keys = malloc(capacity * sizeof(char*));
-    Expr** values = malloc(capacity * sizeof(Expr*));
+    const char** keys = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, capacity);
+    Expr** values = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Expr*, capacity);
     
     do {
         if (count > 0 && !match(parser, TOKEN_COMMA)) {
@@ -591,22 +670,23 @@ static Expr* parse_object_literal(Parser* parser)
         // Parse key
         char* key;
         if (match(parser, TOKEN_IDENTIFIER)) {
-            key = malloc(parser->previous.lexeme_length + 1);
+            key = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(key, parser->previous.lexeme, parser->previous.lexeme_length);
             key[parser->previous.lexeme_length] = '\0';
         } else if (match(parser, TOKEN_STRING)) {
             size_t str_len = parser->previous.lexeme_length - 2;
-            key = malloc(str_len + 1);
+            key = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), str_len + 1);
             memcpy(key, parser->previous.lexeme + 1, str_len);
             key[str_len] = '\0';
         } else {
             parser_error_at_current(parser, "Expect property key.");
             // Clean up
             for (size_t i = 0; i < count; i++) {
-                free((char*)keys[i]);
+                parser_free_string((char*)keys[i]);
             }
-            free(keys);
-            free(values);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            MEM_FREE(alloc, keys, capacity * sizeof(char*));
+            MEM_FREE(alloc, values, capacity * sizeof(Expr*));
             return NULL;
         }
         
@@ -614,8 +694,16 @@ static Expr* parse_object_literal(Parser* parser)
         
         if (count >= capacity) {
             capacity *= 2;
-            keys = realloc(keys, capacity * sizeof(char*));
-            values = realloc(values, capacity * sizeof(Expr*));
+            size_t old_capacity = capacity - (capacity / 2);  // Calculate old capacity
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            const char** new_keys = MEM_ALLOC(alloc, capacity * sizeof(char*));
+            Expr** new_values = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
+            memcpy(new_keys, keys, old_capacity * sizeof(char*));
+            memcpy(new_values, values, old_capacity * sizeof(Expr*));
+            MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
+            MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
+            keys = new_keys;
+            values = new_values;
         }
         
         keys[count] = key;
@@ -632,7 +720,7 @@ static Expr* finish_call(Parser* parser, Expr* callee)
 {
     size_t capacity = 8;
     size_t count = 0;
-    Expr** arguments = malloc(capacity * sizeof(Expr*));
+    Expr** arguments = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Expr*, capacity);
 
     if (!check(parser, TOKEN_RIGHT_PAREN))
     {
@@ -640,8 +728,13 @@ static Expr* finish_call(Parser* parser, Expr* callee)
         {
             if (count >= capacity)
             {
+                size_t old_capacity = capacity;
                 capacity *= 2;
-                arguments = realloc(arguments, capacity * sizeof(Expr*));
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                Expr** new_arguments = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
+                memcpy(new_arguments, arguments, old_capacity * sizeof(Expr*));
+                MEM_FREE(alloc, arguments, old_capacity * sizeof(Expr*));
+                arguments = new_arguments;
             }
             
             // Check for named parameter syntax: name: value
@@ -692,11 +785,11 @@ static Expr* call(Parser* parser)
         {
             // Parse member access
             consume(parser, TOKEN_IDENTIFIER, "Expect property name after '.'.");
-            char* property = malloc(parser->previous.lexeme_length + 1);
+            char* property = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(property, parser->previous.lexeme, parser->previous.lexeme_length);
             property[parser->previous.lexeme_length] = '\0';
             expr = expr_create_member(expr, property);
-            free(property);
+            parser_free_string(property);
         }
         else if (match(parser, TOKEN_PLUS_PLUS) || match(parser, TOKEN_MINUS_MINUS))
         {
@@ -943,7 +1036,7 @@ static Stmt* var_statement(Parser* parser)
     bool is_mutable = parser->previous.type == TOKEN_VAR;
 
     consume(parser, TOKEN_IDENTIFIER, "Expect variable name.");
-    char* name = malloc(parser->previous.lexeme_length + 1);
+    char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
     name[parser->previous.lexeme_length] = '\0';
 
@@ -951,7 +1044,7 @@ static Stmt* var_statement(Parser* parser)
     if (match(parser, TOKEN_COLON))
     {
         consume(parser, TOKEN_IDENTIFIER, "Expect type name.");
-        type_annotation = malloc(parser->previous.lexeme_length + 1);
+        type_annotation = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(type_annotation, parser->previous.lexeme, parser->previous.lexeme_length);
         type_annotation[parser->previous.lexeme_length] = '\0';
     }
@@ -965,8 +1058,8 @@ static Stmt* var_statement(Parser* parser)
     optional_semicolon(parser);
 
     Stmt* stmt = stmt_create_var_decl(is_mutable, name, type_annotation, initializer);
-    free(name);
-    free(type_annotation);
+    parser_free_string(name);
+    parser_free_string(type_annotation);
     return stmt;
 }
 
@@ -974,14 +1067,19 @@ static Stmt* block_statement(Parser* parser)
 {
     size_t capacity = 8;
     size_t count = 0;
-    Stmt** statements = malloc(capacity * sizeof(Stmt*));
+    Stmt** statements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
 
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            statements = realloc(statements, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_statements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+            statements = new_statements;
         }
         statements[count++] = declaration(parser);
     }
@@ -1038,7 +1136,7 @@ static Stmt* for_statement(Parser* parser)
     {
         // Swift-style for-in loop: for identifier in expression
         consume(parser, TOKEN_IDENTIFIER, "Expect variable name after 'for'.");
-        char* var_name = malloc(parser->previous.lexeme_length + 1);
+        char* var_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(var_name, parser->previous.lexeme, parser->previous.lexeme_length);
         var_name[parser->previous.lexeme_length] = '\0';
         
@@ -1049,7 +1147,7 @@ static Stmt* for_statement(Parser* parser)
         Stmt* body = block_statement(parser);
         
         Stmt* stmt = stmt_create_for_in(var_name, iterable, body);
-        free(var_name);
+        parser_free_string(var_name);
         return stmt;
     }
     
@@ -1067,7 +1165,7 @@ static Stmt* for_statement(Parser* parser)
         if (check(parser, TOKEN_IN))
         {
             // This is a for-in loop with parentheses
-            char* var_name = malloc(parser->previous.lexeme_length + 1);
+            char* var_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(var_name, parser->previous.lexeme, parser->previous.lexeme_length);
             var_name[parser->previous.lexeme_length] = '\0';
             
@@ -1078,7 +1176,7 @@ static Stmt* for_statement(Parser* parser)
             Stmt* body = statement(parser);
             
             Stmt* stmt = stmt_create_for_in(var_name, iterable, body);
-            free(var_name);
+            parser_free_string(var_name);
             return stmt;
         }
         else
@@ -1166,14 +1264,14 @@ static Stmt* function_declaration(Parser* parser);
 static Stmt* class_declaration(Parser* parser)
 {
     consume(parser, TOKEN_IDENTIFIER, "Expect class name.");
-    char* name = malloc(parser->previous.lexeme_length + 1);
+    char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
     name[parser->previous.lexeme_length] = '\0';
 
     char* superclass = NULL;
     if (match(parser, TOKEN_COLON)) {
         consume(parser, TOKEN_IDENTIFIER, "Expect superclass name.");
-        superclass = malloc(parser->previous.lexeme_length + 1);
+        superclass = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(superclass, parser->previous.lexeme, parser->previous.lexeme_length);
         superclass[parser->previous.lexeme_length] = '\0';
     }
@@ -1182,14 +1280,19 @@ static Stmt* class_declaration(Parser* parser)
 
     size_t capacity = 16;
     size_t count = 0;
-    Stmt** members = malloc(capacity * sizeof(Stmt*));
+    Stmt** members = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
 
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            members = realloc(members, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_members = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_members, members, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
+            members = new_members;
         }
 
         // Parse member (property or method)
@@ -1198,7 +1301,7 @@ static Stmt* class_declaration(Parser* parser)
             bool is_mutable = parser->previous.type == TOKEN_VAR;
             
             consume(parser, TOKEN_IDENTIFIER, "Expect property name.");
-            char* prop_name = malloc(parser->previous.lexeme_length + 1);
+            char* prop_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(prop_name, parser->previous.lexeme, parser->previous.lexeme_length);
             prop_name[parser->previous.lexeme_length] = '\0';
 
@@ -1206,7 +1309,7 @@ static Stmt* class_declaration(Parser* parser)
             char* type_name = NULL;
             if (match(parser, TOKEN_COLON)) {
                 consume(parser, TOKEN_IDENTIFIER, "Expect type name.");
-                type_name = malloc(parser->previous.lexeme_length + 1);
+                type_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy(type_name, parser->previous.lexeme, parser->previous.lexeme_length);
                 type_name[parser->previous.lexeme_length] = '\0';
             }
@@ -1241,7 +1344,7 @@ static Stmt* function_declaration(Parser* parser)
     char* method_name = NULL;
     
     consume(parser, TOKEN_IDENTIFIER, "Expect function name or type name.");
-    char* first_name = malloc(parser->previous.lexeme_length + 1);
+    char* first_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(first_name, parser->previous.lexeme, parser->previous.lexeme_length);
     first_name[parser->previous.lexeme_length] = '\0';
     
@@ -1250,7 +1353,7 @@ static Stmt* function_declaration(Parser* parser)
         // This is an extension method: Type.method
         type_name = first_name;
         consume(parser, TOKEN_IDENTIFIER, "Expect method name after '.'.");
-        method_name = malloc(parser->previous.lexeme_length + 1);
+        method_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(method_name, parser->previous.lexeme, parser->previous.lexeme_length);
         method_name[parser->previous.lexeme_length] = '\0';
         
@@ -1269,13 +1372,13 @@ static Stmt* function_declaration(Parser* parser)
 
     size_t capacity = 8;
     size_t count = 0;
-    const char** param_names = malloc(capacity * sizeof(char*));
-    const char** param_types = malloc(capacity * sizeof(char*));
+    const char** param_names = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, capacity);
+    const char** param_types = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, capacity);
     
     // For extension methods, automatically add 'this' as first parameter
     if (type_name != NULL)
     {
-        param_names[count] = strdup("this");
+        param_names[count] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), "this");
         param_types[count] = type_name;  // The type of 'this' is the extended type
         count++;
     }
@@ -1286,15 +1389,23 @@ static Stmt* function_declaration(Parser* parser)
         {
             if (count >= capacity)
             {
+                size_t old_capacity = capacity;
                 capacity *= 2;
-                param_names = realloc(param_names, capacity * sizeof(char*));
-                param_types = realloc(param_types, capacity * sizeof(char*));
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                const char** new_param_names = MEM_ALLOC(alloc, capacity * sizeof(char*));
+                const char** new_param_types = MEM_ALLOC(alloc, capacity * sizeof(char*));
+                memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
+                memcpy(new_param_types, param_types, old_capacity * sizeof(char*));
+                MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
+                param_names = new_param_names;
+                param_types = new_param_types;
             }
 
             // Check for external parameter name syntax: externalName internalName
             // or just: parameterName (where external and internal are the same)
             consume(parser, TOKEN_IDENTIFIER, "Expect parameter name.");
-            char* external_name = malloc(parser->previous.lexeme_length + 1);
+            char* external_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(external_name, parser->previous.lexeme, parser->previous.lexeme_length);
             external_name[parser->previous.lexeme_length] = '\0';
             
@@ -1304,7 +1415,7 @@ static Stmt* function_declaration(Parser* parser)
             if (check(parser, TOKEN_IDENTIFIER) && !check(parser, TOKEN_COLON))
             {
                 advance(parser);
-                internal_name = malloc(parser->previous.lexeme_length + 1);
+                internal_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy(internal_name, parser->previous.lexeme, parser->previous.lexeme_length);
                 internal_name[parser->previous.lexeme_length] = '\0';
             }
@@ -1316,7 +1427,7 @@ static Stmt* function_declaration(Parser* parser)
             if (match(parser, TOKEN_COLON))
             {
                 consume(parser, TOKEN_IDENTIFIER, "Expect type name.");
-                param_type = malloc(parser->previous.lexeme_length + 1);
+                param_type = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy(param_type, parser->previous.lexeme, parser->previous.lexeme_length);
                 param_type[parser->previous.lexeme_length] = '\0';
             }
@@ -1334,7 +1445,7 @@ static Stmt* function_declaration(Parser* parser)
     if (match(parser, TOKEN_ARROW))
     {
         consume(parser, TOKEN_IDENTIFIER, "Expect return type.");
-        return_type = malloc(parser->previous.lexeme_length + 1);
+        return_type = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(return_type, parser->previous.lexeme, parser->previous.lexeme_length);
         return_type[parser->previous.lexeme_length] = '\0';
     }
@@ -1351,13 +1462,13 @@ static Stmt* function_declaration(Parser* parser)
         // For extension methods, we need to prefix the name with the type
         // to distinguish it as an extension method
         size_t ext_name_len = strlen(type_name) + strlen(name) + 6; // "_ext_" + null
-        char* ext_name = malloc(ext_name_len);
+        char* ext_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), ext_name_len);
         snprintf(ext_name, ext_name_len, "%s_ext_%s", type_name, name);
         
         // printf("DEBUG: Created extension function name: %s\n", ext_name);
         
         // Free the old name and use the new one
-        free((void*)stmt->function.name);
+        parser_free_string((char*)stmt->function.name);
         stmt->function.name = ext_name;
         
         // Don't free type_name here - it's the same as first_name
@@ -1366,21 +1477,22 @@ static Stmt* function_declaration(Parser* parser)
     // Clean up temporary allocations
     if (method_name != NULL) {
         // For extension methods, name points to method_name
-        free(method_name);
+        parser_free_string(method_name);
         // first_name was used as type_name and already freed
     } else {
         // For regular functions, name points to first_name
-        free(first_name);
+        parser_free_string(first_name);
     }
     
     for (size_t i = 0; i < count; i++)
     {
-        free((void*)param_names[i]);
-        if (param_types[i]) free((void*)param_types[i]);
+        parser_free_string((char*)param_names[i]);
+        if (param_types[i]) parser_free_string((char*)param_types[i]);
     }
-    free(param_names);
-    free(param_types);
-    if (return_type) free(return_type);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+    MEM_FREE(alloc, param_names, capacity * sizeof(char*));
+    MEM_FREE(alloc, param_types, capacity * sizeof(char*));
+    if (return_type) parser_free_string(return_type);
 
     return stmt;
 }
@@ -1396,7 +1508,7 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
         *is_local = true;
         
         size_t capacity = 64;
-        char* path = malloc(capacity);
+        char* path = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), capacity);
         strcpy(path, "@");
         size_t path_len = 1;
         
@@ -1406,8 +1518,13 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
         // Append module name
         size_t part_len = parser->previous.lexeme_length;
         if (path_len + part_len + 1 > capacity) {
+            size_t old_capacity = capacity;
             capacity = path_len + part_len + 32;
-            path = realloc(path, capacity);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            char* new_path = MEM_ALLOC(alloc, capacity);
+            memcpy(new_path, path, path_len);
+            MEM_FREE(alloc, path, old_capacity);
+            path = new_path;
         }
         memcpy(path + path_len, parser->previous.lexeme, part_len);
         path_len += part_len;
@@ -1415,16 +1532,26 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
         // Parse optional path segments
         while (match(parser, TOKEN_SLASH)) {
             if (path_len + 1 >= capacity) {
+                size_t old_capacity = capacity;
                 capacity = path_len + 32;
-                path = realloc(path, capacity);
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                char* new_path = MEM_ALLOC(alloc, capacity);
+                memcpy(new_path, path, path_len);
+                MEM_FREE(alloc, path, old_capacity);
+                path = new_path;
             }
             path[path_len++] = '/';
             
             consume(parser, TOKEN_IDENTIFIER, "Expect path segment after '/'.");
             part_len = parser->previous.lexeme_length;
             if (path_len + part_len + 1 > capacity) {
+                size_t old_capacity = capacity;
                 capacity = path_len + part_len + 32;
-                path = realloc(path, capacity);
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                char* new_path = MEM_ALLOC(alloc, capacity);
+                memcpy(new_path, path, path_len);
+                MEM_FREE(alloc, path, old_capacity);
+                path = new_path;
             }
             memcpy(path + path_len, parser->previous.lexeme, part_len);
             path_len += part_len;
@@ -1440,7 +1567,7 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
         consume(parser, TOKEN_IDENTIFIER, "Expect native module name after '$'.");
         
         size_t len = parser->previous.lexeme_length;
-        char* path = malloc(len + 2);
+        char* path = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), len + 2);
         path[0] = '$';
         memcpy(path + 1, parser->previous.lexeme, len);
         path[len + 1] = '\0';
@@ -1458,7 +1585,7 @@ static char* parse_module_path(Parser* parser)
 {
     size_t path_len = 0;
     size_t capacity = 64;
-    char* path = malloc(capacity);
+    char* path = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), capacity);
     path[0] = '\0';
     
     // Parse first identifier
@@ -1466,8 +1593,13 @@ static char* parse_module_path(Parser* parser)
     
     // Copy first part
     if (parser->previous.lexeme_length + 1 > capacity) {
+        size_t old_capacity = capacity;
         capacity = parser->previous.lexeme_length + 1;
-        path = realloc(path, capacity);
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+        char* new_path = MEM_ALLOC(alloc, capacity);
+        memcpy(new_path, path, path_len);
+        MEM_FREE(alloc, path, old_capacity);
+        path = new_path;
     }
     memcpy(path, parser->previous.lexeme, parser->previous.lexeme_length);
     path_len = parser->previous.lexeme_length;
@@ -1481,8 +1613,13 @@ static char* parse_module_path(Parser* parser)
         // Resize if needed
         size_t needed = path_len + 1 + parser->previous.lexeme_length + 1;
         if (needed > capacity) {
+            size_t old_capacity = capacity;
             capacity = needed * 2;
-            path = realloc(path, capacity);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            char* new_path = MEM_ALLOC(alloc, capacity);
+            memcpy(new_path, path, path_len);
+            MEM_FREE(alloc, path, old_capacity);
+            path = new_path;
         }
         
         // Add separator and next part
@@ -1511,18 +1648,23 @@ static Stmt* import_declaration(Parser* parser)
         // import { foo, bar } from sys.module
         size_t capacity = 4;
         size_t count = 0;
-        ImportSpecifier* specifiers = malloc(capacity * sizeof(ImportSpecifier));
+        ImportSpecifier* specifiers = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), ImportSpecifier, capacity);
         
         do
         {
             if (count >= capacity)
             {
+                size_t old_capacity = capacity;
                 capacity *= 2;
-                specifiers = realloc(specifiers, capacity * sizeof(ImportSpecifier));
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                ImportSpecifier* new_specifiers = MEM_ALLOC(alloc, capacity * sizeof(ImportSpecifier));
+                memcpy(new_specifiers, specifiers, old_capacity * sizeof(ImportSpecifier));
+                MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
+                specifiers = new_specifiers;
             }
             
             consume(parser, TOKEN_IDENTIFIER, "Expect import specifier name.");
-            char* name = malloc(parser->previous.lexeme_length + 1);
+            char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
             name[parser->previous.lexeme_length] = '\0';
             
@@ -1530,7 +1672,7 @@ static Stmt* import_declaration(Parser* parser)
             if (match(parser, TOKEN_AS))
             {
                 consume(parser, TOKEN_IDENTIFIER, "Expect alias name after 'as'.");
-                alias = malloc(parser->previous.lexeme_length + 1);
+                alias = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy(alias, parser->previous.lexeme, parser->previous.lexeme_length);
                 alias[parser->previous.lexeme_length] = '\0';
             }
@@ -1553,7 +1695,7 @@ static Stmt* import_declaration(Parser* parser)
         stmt->import_decl.specifier_count = count;
         stmt->import_decl.is_local = is_local;
         stmt->import_decl.is_native = is_native;
-        free(module_path);
+        parser_free_string(module_path);
     }
     else if (match(parser, TOKEN_STAR))
     {
@@ -1570,13 +1712,13 @@ static Stmt* import_declaration(Parser* parser)
             stmt->import_decl.import_all_to_scope = true;  // Mark as import * from
             // No alias means import all exports into current scope
             stmt->import_decl.alias = NULL;
-            free(module_path);
+            parser_free_string(module_path);
         } else {
             // import * as namespace from module
             consume(parser, TOKEN_AS, "Expect 'as' or 'from' after '*'.");
             consume(parser, TOKEN_IDENTIFIER, "Expect namespace name.");
             
-            char* namespace_alias = malloc(parser->previous.lexeme_length + 1);
+            char* namespace_alias = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(namespace_alias, parser->previous.lexeme, parser->previous.lexeme_length);
             namespace_alias[parser->previous.lexeme_length] = '\0';
             
@@ -1590,7 +1732,7 @@ static Stmt* import_declaration(Parser* parser)
             stmt->import_decl.namespace_alias = namespace_alias;
             stmt->import_decl.is_local = is_local;
             stmt->import_decl.is_native = is_native;
-            free(module_path);
+            parser_free_string(module_path);
         }
     }
     else if (check(parser, TOKEN_IDENTIFIER) || check(parser, TOKEN_AT) || check(parser, TOKEN_DOLLAR))
@@ -1605,7 +1747,7 @@ static Stmt* import_declaration(Parser* parser)
         if (match(parser, TOKEN_AS))
         {
             consume(parser, TOKEN_IDENTIFIER, "Expect alias after 'as'.");
-            alias = malloc(parser->previous.lexeme_length + 1);
+            alias = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(alias, parser->previous.lexeme, parser->previous.lexeme_length);
             alias[parser->previous.lexeme_length] = '\0';
         }
@@ -1614,7 +1756,7 @@ static Stmt* import_declaration(Parser* parser)
             // For @module imports without explicit alias, use module name as alias
             // This makes `import @math` equivalent to `import @math as math`
             const char* module_name = module_path + 1;  // Skip @
-            alias = strdup(module_name);
+            alias = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), module_name);
         }
         
         stmt = stmt_create_import(IMPORT_ALL, module_path);
@@ -1622,7 +1764,7 @@ static Stmt* import_declaration(Parser* parser)
         stmt->import_decl.is_local = is_local;
         stmt->import_decl.is_native = is_native;
         
-        free(module_path);
+        parser_free_string(module_path);
     }
     else
     {
@@ -1654,7 +1796,8 @@ static Stmt* export_declaration(Parser* parser)
             Stmt* func_stmt = function_declaration(parser);
             stmt = stmt_create_export(EXPORT_DEFAULT);
             stmt->export_decl.default_export.name = func_stmt->function.name;
-            free(func_stmt);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            MEM_FREE(alloc, func_stmt, sizeof(Stmt));
         }
         else
         {
@@ -1672,7 +1815,7 @@ static Stmt* export_declaration(Parser* parser)
         consume(parser, TOKEN_FROM, "Expect 'from' after '*'.");
         consume(parser, TOKEN_STRING, "Expect module path string.");
         
-        char* module_path = strdup(parser->previous.literal.string_value);
+        char* module_path = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
         
         stmt = stmt_create_export(EXPORT_ALL);
         stmt->export_decl.all_export.from_module = module_path;
@@ -1682,18 +1825,23 @@ static Stmt* export_declaration(Parser* parser)
         // export { foo, bar } [from "module"]
         size_t capacity = 4;
         size_t count = 0;
-        ImportSpecifier* specifiers = malloc(capacity * sizeof(ImportSpecifier));
+        ImportSpecifier* specifiers = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), ImportSpecifier, capacity);
         
         do
         {
             if (count >= capacity)
             {
+                size_t old_capacity = capacity;
                 capacity *= 2;
-                specifiers = realloc(specifiers, capacity * sizeof(ImportSpecifier));
+                Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                ImportSpecifier* new_specifiers = MEM_ALLOC(alloc, capacity * sizeof(ImportSpecifier));
+                memcpy(new_specifiers, specifiers, old_capacity * sizeof(ImportSpecifier));
+                MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
+                specifiers = new_specifiers;
             }
             
             consume(parser, TOKEN_IDENTIFIER, "Expect export specifier name.");
-            char* name = malloc(parser->previous.lexeme_length + 1);
+            char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
             name[parser->previous.lexeme_length] = '\0';
             
@@ -1701,7 +1849,7 @@ static Stmt* export_declaration(Parser* parser)
             if (match(parser, TOKEN_AS))
             {
                 consume(parser, TOKEN_IDENTIFIER, "Expect alias name after 'as'.");
-                alias = malloc(parser->previous.lexeme_length + 1);
+                alias = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy(alias, parser->previous.lexeme, parser->previous.lexeme_length);
                 alias[parser->previous.lexeme_length] = '\0';
             }
@@ -1718,7 +1866,7 @@ static Stmt* export_declaration(Parser* parser)
         if (match(parser, TOKEN_FROM))
         {
             consume(parser, TOKEN_STRING, "Expect module path string.");
-            from_module = strdup(parser->previous.literal.string_value);
+            from_module = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
         }
         
         stmt = stmt_create_export(EXPORT_NAMED);
@@ -1768,14 +1916,19 @@ static Stmt* module_declaration(Parser* parser)
     
     size_t capacity = 16;
     size_t count = 0;
-    Decl** declarations = malloc(capacity * sizeof(Decl*));
+    Decl** declarations = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Decl*, capacity);
     
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            declarations = realloc(declarations, capacity * sizeof(Decl*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Decl** new_declarations = MEM_ALLOC(alloc, capacity * sizeof(Decl*));
+            memcpy(new_declarations, declarations, old_capacity * sizeof(Decl*));
+            MEM_FREE(alloc, declarations, old_capacity * sizeof(Decl*));
+            declarations = new_declarations;
         }
         
         // Parse declarations inside module
@@ -1784,7 +1937,7 @@ static Stmt* module_declaration(Parser* parser)
                     stmt->type == STMT_STRUCT || stmt->type == STMT_VAR))
         {
             // Convert statement to declaration
-            Decl* decl = malloc(sizeof(Decl));
+            Decl* decl = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Decl);
             if (stmt->type == STMT_FUNCTION) {
                 decl->type = DECL_FUNCTION;
                 decl->function = stmt->function;
@@ -1796,7 +1949,8 @@ static Stmt* module_declaration(Parser* parser)
                 decl->struct_decl = stmt->struct_decl;
             }
             declarations[count++] = decl;
-            free(stmt);
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            MEM_FREE(alloc, stmt, sizeof(Stmt));
         }
         
         if (parser->panic_mode)
@@ -1808,7 +1962,7 @@ static Stmt* module_declaration(Parser* parser)
     consume(parser, TOKEN_RIGHT_BRACE, "Expect '}' after module body.");
     
     // Create module declaration
-    Stmt* stmt = malloc(sizeof(Stmt));
+    Stmt* stmt = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Stmt);
     stmt->type = STMT_MODULE;
     stmt->module_decl.name = module_name;
     stmt->module_decl.declarations = declarations;
@@ -1821,7 +1975,7 @@ static Stmt* module_declaration(Parser* parser)
 static Stmt* struct_declaration(Parser* parser)
 {
     consume(parser, TOKEN_IDENTIFIER, "Expect struct name.");
-    char* name = malloc(parser->previous.lexeme_length + 1);
+    char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
     name[parser->previous.lexeme_length] = '\0';
     
@@ -1829,14 +1983,19 @@ static Stmt* struct_declaration(Parser* parser)
     
     size_t capacity = 8;
     size_t count = 0;
-    Stmt** members = malloc(capacity * sizeof(Stmt*));
+    Stmt** members = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
     
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            members = realloc(members, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_members = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_members, members, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
+            members = new_members;
         }
         
         // Parse member variable only (structs are data-only)
@@ -1854,7 +2013,7 @@ static Stmt* struct_declaration(Parser* parser)
     consume(parser, TOKEN_RIGHT_BRACE, "Expect '}' after struct body.");
     
     // Create a proper struct declaration statement
-    Stmt* stmt = malloc(sizeof(Stmt));
+    Stmt* stmt = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Stmt);
     stmt->type = STMT_STRUCT;
     stmt->struct_decl.name = name;
     stmt->struct_decl.members = members;
@@ -1866,7 +2025,7 @@ static Stmt* struct_declaration(Parser* parser)
 static Stmt* protocol_declaration(Parser* parser)
 {
     consume(parser, TOKEN_IDENTIFIER, "Expect protocol name.");
-    char* name = malloc(parser->previous.lexeme_length + 1);
+    char* name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
     name[parser->previous.lexeme_length] = '\0';
     
@@ -1874,14 +2033,19 @@ static Stmt* protocol_declaration(Parser* parser)
     
     size_t capacity = 8;
     size_t count = 0;
-    Stmt** requirements = malloc(capacity * sizeof(Stmt*));
+    Stmt** requirements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
     
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            requirements = realloc(requirements, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_requirements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_requirements, requirements, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, requirements, old_capacity * sizeof(Stmt*));
+            requirements = new_requirements;
         }
         
         // Parse protocol requirements (function signatures, property requirements)
@@ -1889,7 +2053,7 @@ static Stmt* protocol_declaration(Parser* parser)
         {
             // Parse function requirement
             consume(parser, TOKEN_IDENTIFIER, "Expect function name.");
-            char* func_name = malloc(parser->previous.lexeme_length + 1);
+            char* func_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(func_name, parser->previous.lexeme, parser->previous.lexeme_length);
             func_name[parser->previous.lexeme_length] = '\0';
             
@@ -1898,8 +2062,8 @@ static Stmt* protocol_declaration(Parser* parser)
             // Parse parameters
             size_t param_capacity = 4;
             size_t param_count = 0;
-            const char** param_names = malloc(param_capacity * sizeof(char*));
-            const char** param_types = malloc(param_capacity * sizeof(char*));
+            const char** param_names = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, param_capacity);
+            const char** param_types = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), char*, param_capacity);
             
             if (!check(parser, TOKEN_RIGHT_PAREN))
             {
@@ -1907,20 +2071,28 @@ static Stmt* protocol_declaration(Parser* parser)
                 {
                     if (param_count >= param_capacity)
                     {
+                        size_t old_capacity = param_capacity;
                         param_capacity *= 2;
-                        param_names = realloc(param_names, param_capacity * sizeof(char*));
-                        param_types = realloc(param_types, param_capacity * sizeof(char*));
+                        Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+                        const char** new_param_names = MEM_ALLOC(alloc, param_capacity * sizeof(char*));
+                        const char** new_param_types = MEM_ALLOC(alloc, param_capacity * sizeof(char*));
+                        memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
+                        memcpy(new_param_types, param_types, old_capacity * sizeof(char*));
+                        MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                        MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
+                        param_names = new_param_names;
+                        param_types = new_param_types;
                     }
                     
                     consume(parser, TOKEN_IDENTIFIER, "Expect parameter name.");
-                    char* param_name = malloc(parser->previous.lexeme_length + 1);
+                    char* param_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                     memcpy(param_name, parser->previous.lexeme, parser->previous.lexeme_length);
                     param_name[parser->previous.lexeme_length] = '\0';
                     param_names[param_count] = param_name;
                     
                     consume(parser, TOKEN_COLON, "Expect ':' after parameter name.");
                     consume(parser, TOKEN_IDENTIFIER, "Expect parameter type.");
-                    char* param_type = malloc(parser->previous.lexeme_length + 1);
+                    char* param_type = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                     memcpy(param_type, parser->previous.lexeme, parser->previous.lexeme_length);
                     param_type[parser->previous.lexeme_length] = '\0';
                     param_types[param_count] = param_type;
@@ -1936,7 +2108,7 @@ static Stmt* protocol_declaration(Parser* parser)
             if (match(parser, TOKEN_ARROW))
             {
                 consume(parser, TOKEN_IDENTIFIER, "Expect return type.");
-                return_type = malloc(parser->previous.lexeme_length + 1);
+                return_type = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
                 memcpy((char*)return_type, parser->previous.lexeme, parser->previous.lexeme_length);
                 ((char*)return_type)[parser->previous.lexeme_length] = '\0';
             }
@@ -1945,7 +2117,7 @@ static Stmt* protocol_declaration(Parser* parser)
             requirements[count++] = stmt_create_function(func_name, param_names, param_types, 
                                                        param_count, return_type, NULL);
             
-            free(func_name);
+            parser_free_string(func_name);
         }
         else if (match(parser, TOKEN_VAR) || match(parser, TOKEN_LET))
         {
@@ -1953,20 +2125,20 @@ static Stmt* protocol_declaration(Parser* parser)
             bool is_mutable = parser->previous.type == TOKEN_VAR;
             
             consume(parser, TOKEN_IDENTIFIER, "Expect property name.");
-            char* prop_name = malloc(parser->previous.lexeme_length + 1);
+            char* prop_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(prop_name, parser->previous.lexeme, parser->previous.lexeme_length);
             prop_name[parser->previous.lexeme_length] = '\0';
             
             consume(parser, TOKEN_COLON, "Expect ':' after property name.");
             consume(parser, TOKEN_IDENTIFIER, "Expect property type.");
-            char* prop_type = malloc(parser->previous.lexeme_length + 1);
+            char* prop_type = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
             memcpy(prop_type, parser->previous.lexeme, parser->previous.lexeme_length);
             prop_type[parser->previous.lexeme_length] = '\0';
             
             requirements[count++] = stmt_create_var_decl(is_mutable, prop_name, prop_type, NULL);
             
-            free(prop_name);
-            free(prop_type);
+            parser_free_string(prop_name);
+            parser_free_string(prop_type);
         }
         else
         {
@@ -1981,12 +2153,13 @@ static Stmt* protocol_declaration(Parser* parser)
     
     // For now, create a placeholder statement
     // In a full implementation, we'd need to add protocol support to the AST
-    Stmt* stmt = malloc(sizeof(Stmt));
+    Stmt* stmt = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Stmt);
     stmt->type = STMT_EXPRESSION;
     stmt->expression.expression = expr_create_literal_nil();
     
-    free(name);
-    free(requirements);
+    parser_free_string(name);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+    MEM_FREE(alloc, requirements, capacity * sizeof(Stmt*));
     
     return stmt;
 }
@@ -1995,7 +2168,7 @@ static Stmt* extension_declaration(Parser* parser)
 {
     // extension TypeName { methods }
     consume(parser, TOKEN_IDENTIFIER, "Expect type name after 'extension'.");
-    char* type_name = malloc(parser->previous.lexeme_length + 1);
+    char* type_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
     memcpy(type_name, parser->previous.lexeme, parser->previous.lexeme_length);
     type_name[parser->previous.lexeme_length] = '\0';
     
@@ -2004,7 +2177,7 @@ static Stmt* extension_declaration(Parser* parser)
     if (match(parser, TOKEN_COLON))
     {
         consume(parser, TOKEN_IDENTIFIER, "Expect protocol name after ':'.");
-        protocol_name = malloc(parser->previous.lexeme_length + 1);
+        protocol_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.lexeme_length + 1);
         memcpy(protocol_name, parser->previous.lexeme, parser->previous.lexeme_length);
         protocol_name[parser->previous.lexeme_length] = '\0';
     }
@@ -2013,14 +2186,19 @@ static Stmt* extension_declaration(Parser* parser)
     
     size_t capacity = 8;
     size_t count = 0;
-    Stmt** methods = malloc(capacity * sizeof(Stmt*));
+    Stmt** methods = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
     
     while (!check(parser, TOKEN_RIGHT_BRACE) && !check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            methods = realloc(methods, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_methods = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_methods, methods, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, methods, old_capacity * sizeof(Stmt*));
+            methods = new_methods;
         }
         
         // Only allow function declarations in extensions
@@ -2042,7 +2220,7 @@ static Stmt* extension_declaration(Parser* parser)
     // that will be processed by the compiler to add to the appropriate prototype
     
     // Create a special statement to represent the extension
-    Stmt* extension_stmt = malloc(sizeof(Stmt));
+    Stmt* extension_stmt = MEM_NEW(allocators_get(ALLOC_SYSTEM_PARSER), Stmt);
     extension_stmt->type = STMT_BLOCK;
     extension_stmt->block.statements = methods;
     extension_stmt->block.statement_count = count;
@@ -2058,15 +2236,15 @@ static Stmt* extension_declaration(Parser* parser)
             {
                 const char* orig_name = methods[i]->function.name;
                 size_t new_name_len = strlen(type_name) + strlen(orig_name) + 2;
-                char* new_name = malloc(new_name_len);
+                char* new_name = MEM_ALLOC(allocators_get(ALLOC_SYSTEM_PARSER), new_name_len);
                 snprintf(new_name, new_name_len, "%s_%s", type_name, orig_name);
                 methods[i]->function.name = new_name;
             }
         }
     }
     
-    free(type_name);
-    if (protocol_name) free(protocol_name);
+    parser_free_string(type_name);
+    if (protocol_name) parser_free_string(protocol_name);
     
     return extension_stmt;
 }
@@ -2125,14 +2303,19 @@ ProgramNode* parser_parse_program(Parser* parser)
     
     size_t capacity = 16;
     size_t count = 0;
-    Stmt** statements = malloc(capacity * sizeof(Stmt*));
+    Stmt** statements = MEM_NEW_ARRAY(allocators_get(ALLOC_SYSTEM_PARSER), Stmt*, capacity);
 
     while (!check(parser, TOKEN_EOF))
     {
         if (count >= capacity)
         {
+            size_t old_capacity = capacity;
             capacity *= 2;
-            statements = realloc(statements, capacity * sizeof(Stmt*));
+            Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
+            Stmt** new_statements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
+            memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
+            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+            statements = new_statements;
         }
 
         Stmt* stmt = declaration(parser);

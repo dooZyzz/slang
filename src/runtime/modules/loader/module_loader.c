@@ -31,7 +31,7 @@
  */
 
 #include "runtime/modules/loader/module_loader.h"
-#include <stdlib.h>
+#include "utils/allocators.h"
 #include <string.h>
 #include <stdio.h>
 #include <dlfcn.h>
@@ -42,6 +42,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <libgen.h>
+#include <stdlib.h>
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
@@ -58,6 +59,9 @@
 #include "runtime/modules/extensions/module_hooks.h"
 #include "runtime/modules/extensions/module_inspect.h"
 #include "runtime/modules/loader/module_cache.h"
+
+// Include common module macros
+#include "runtime/modules/module_allocator_macros.h"
 
 // Constants
 #define MODULE_NAME_BUFFER_SIZE 512
@@ -79,9 +83,9 @@ static uint32_t hash_string(const char* key) {
 
 // Module scope functions
 ModuleScope* module_scope_create(void) {
-    ModuleScope* scope = calloc(1, sizeof(ModuleScope));
+    ModuleScope* scope = MODULES_NEW_ZERO(ModuleScope);
     scope->capacity = 16;
-    scope->entries = calloc(scope->capacity, sizeof(ModuleScopeEntry));
+    scope->entries = MODULES_NEW_ARRAY_ZERO(ModuleScopeEntry, scope->capacity);
     return scope;
 }
 
@@ -90,11 +94,12 @@ void module_scope_destroy(ModuleScope* scope) {
     
     for (size_t i = 0; i < scope->capacity; i++) {
         if (scope->entries[i].name) {
-            free((void*)scope->entries[i].name);
+            size_t name_len = strlen(scope->entries[i].name) + 1;
+            STRINGS_FREE((void*)scope->entries[i].name, name_len);
         }
     }
-    free(scope->entries);
-    free(scope);
+    MODULES_FREE(scope->entries, scope->capacity * sizeof(ModuleScopeEntry));
+    MODULES_FREE(scope, sizeof(ModuleScope));
 }
 
 static void module_scope_grow(ModuleScope* scope) {
@@ -102,18 +107,20 @@ static void module_scope_grow(ModuleScope* scope) {
     ModuleScopeEntry* old_entries = scope->entries;
     
     scope->capacity *= 2;
-    scope->entries = calloc(scope->capacity, sizeof(ModuleScopeEntry));
+    scope->entries = MODULES_NEW_ARRAY_ZERO(ModuleScopeEntry, scope->capacity);
     scope->count = 0;
     
     // Rehash existing entries
     for (size_t i = 0; i < old_capacity; i++) {
         if (old_entries[i].name) {
             module_scope_define(scope, old_entries[i].name, old_entries[i].value, old_entries[i].is_exported);
-            free((void*)old_entries[i].name);
+            // Free the name from old entries after copying
+            size_t name_len = strlen(old_entries[i].name) + 1;
+            STRINGS_FREE((void*)old_entries[i].name, name_len);
         }
     }
     
-    free(old_entries);
+    MODULES_FREE(old_entries, old_capacity * sizeof(ModuleScopeEntry));
 }
 
 void module_scope_define(ModuleScope* scope, const char* name, TaggedValue value, bool is_exported) {
@@ -137,7 +144,7 @@ void module_scope_define(ModuleScope* scope, const char* name, TaggedValue value
     }
     
     // New entry
-    scope->entries[index].name = strdup(name);
+    scope->entries[index].name = STRINGS_STRDUP(name);
     scope->entries[index].value = value;
     scope->entries[index].is_exported = is_exported;
     scope->count++;
@@ -220,10 +227,13 @@ bool module_has_in_scope(Module* module, const char* name) {
 static Module* module_load_from_archive(ModuleLoader* loader, const char* archive_path, const char* module_name) {
     MODULE_DEBUG("module_load_from_archive called: archive=%s, module=%s\n", archive_path, module_name);
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Create module
-    Module* module = calloc(1, sizeof(Module));
-    module->path = strdup(module_name);
-    module->absolute_path = strdup(archive_path);
+    Module* module = MODULES_NEW_ZERO(Module);
+    module->path = STRINGS_STRDUP(module_name);
+    module->absolute_path = STRINGS_STRDUP(archive_path);
     module->state = MODULE_STATE_LOADING;
     module->is_native = false;
     module->ref_count = 0;
@@ -235,9 +245,9 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     
     // Initialize exports
     module->exports.capacity = 16;
-    module->exports.names = calloc(module->exports.capacity, sizeof(char*));
-    module->exports.values = calloc(module->exports.capacity, sizeof(TaggedValue));
-    module->exports.visibility = calloc(module->exports.capacity, sizeof(uint8_t));
+    module->exports.names = MODULES_NEW_ARRAY_ZERO(char*, module->exports.capacity);
+    module->exports.values = MODULES_NEW_ARRAY_ZERO(TaggedValue, module->exports.capacity);
+    module->exports.visibility = MODULES_NEW_ARRAY_ZERO(uint8_t, module->exports.capacity);
     
     // Create module object
     module->module_object = object_create();
@@ -276,7 +286,7 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
                 const char* version_end = strchr(version_start, '"');
                 if (version_end) {
                     size_t version_len = version_end - version_start;
-                    char* version = malloc(version_len + 1);
+                    char* version = STRINGS_ALLOC(version_len + 1);
                     strncpy(version, version_start, version_len);
                     version[version_len] = '\0';
                     module->version = version;
@@ -286,7 +296,8 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         }
     }
     
-    free(json_content);
+    // Free json_content using string allocator
+    STRINGS_FREE(json_content, json_size + 1);
     
     // Find the main module bytecode (usually named after the package)
     uint8_t* bytecode = NULL;
@@ -312,23 +323,24 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     MODULE_DEBUG("Successfully extracted bytecode, size: %zu\n", bytecode_size);
     
     // Deserialize and execute the bytecode
-    Chunk* chunk = malloc(sizeof(Chunk));
+    Allocator* bc_alloc = allocators_get(ALLOC_SYSTEM_BYTECODE);
+    Chunk* chunk = BYTECODE_NEW(Chunk);
     chunk_init(chunk);
     
     // Use the proper bytecode deserialization
     MODULE_DEBUG("About to deserialize bytecode of size %zu\n", bytecode_size);
     if (!bytecode_deserialize(bytecode, bytecode_size, chunk)) {
         fprintf(stderr, "Failed to deserialize module bytecode\n");
-        free(bytecode);
+        MODULES_FREE(bytecode, bytecode_size);
         chunk_free(chunk);
-        free(chunk);
+        BYTECODE_FREE(chunk, sizeof(Chunk));
         module_archive_destroy(archive);
         module->state = MODULE_STATE_ERROR;
         return module;
     }
     MODULE_DEBUG("Bytecode deserialized successfully\n");
     
-    free(bytecode);
+    MODULES_FREE(bytecode, bytecode_size);
     
     // Execute module in VM context
     VM* vm = loader->vm;
@@ -347,32 +359,7 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     
     // Execute bytecode
     MODULE_DEBUG("Executing module bytecode for: %s (chunk has %zu bytes)\n", module_name, chunk->count);
-    MODULE_DEBUG("Module pointer: %p, current_module set to: %p\n", module, vm->current_module);
-    
-    // Debug: Print raw bytecode
-    // fprintf(stderr, "[DEBUG] Module bytecode (%zu bytes): ", chunk->count);
-    // for (size_t i = 0; i < chunk->count; i++) {
-    //     fprintf(stderr, "%02x ", chunk->code[i]);
-    // }
-    // fprintf(stderr, "\n");
-    
-    // Debug: Print constants
-    // fprintf(stderr, "[DEBUG] Constants:\n");
-    // for (size_t i = 0; i < chunk->constants.count; i++) {
-    //     fprintf(stderr, "[DEBUG] Constant %zu: ", i);
-    //     TaggedValue* val = &chunk->constants.values[i];
-    //     if (val->type == VAL_STRING) {
-    //         fprintf(stderr, "STRING \"%s\"\n", val->as.string);
-    //     } else if (val->type == VAL_NUMBER) {
-    //         fprintf(stderr, "NUMBER %f\n", val->as.number);
-    //     } else if (val->type == VAL_NIL) {
-    //         fprintf(stderr, "NIL\n");
-    //     } else if (val->type == VAL_BOOL) {
-    //         fprintf(stderr, "BOOL %s\n", val->as.boolean ? "true" : "false");
-    //     } else {
-    //         fprintf(stderr, "OTHER type=%d\n", val->type);
-    //     }
-    // }
+    MODULE_DEBUG("Module pointer: %p, current_module set to: %p\n", (void*)module, (void*)vm->current_module);
     
     // Store the chunk for potential lazy execution
     module->chunk = chunk;
@@ -408,11 +395,11 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         // Copy module globals before destroying the VM
         module->globals.count = module_vm.globals.count;
         module->globals.capacity = module_vm.globals.capacity;
-        module->globals.names = malloc(sizeof(char*) * module->globals.capacity);
-        module->globals.values = malloc(sizeof(TaggedValue) * module->globals.capacity);
+        module->globals.names = MODULES_NEW_ARRAY(char*, module->globals.capacity);
+        module->globals.values = MODULES_NEW_ARRAY(TaggedValue, module->globals.capacity);
         
         for (size_t i = 0; i < module->globals.count; i++) {
-            module->globals.names[i] = strdup(module_vm.globals.names[i]);
+            module->globals.names[i] = STRINGS_STRDUP(module_vm.globals.names[i]);
             module->globals.values[i] = module_vm.globals.values[i];
         }
         
@@ -447,15 +434,28 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
                 }
                 // Add to exports array
                 if (module->exports.count >= module->exports.capacity) {
+                    size_t old_capacity = module->exports.capacity;
                     module->exports.capacity *= 2;
-                    module->exports.names = realloc(module->exports.names, 
-                                                   module->exports.capacity * sizeof(char*));
-                    module->exports.values = realloc(module->exports.values,
-                                                    module->exports.capacity * sizeof(TaggedValue));
-                    module->exports.visibility = realloc(module->exports.visibility,
-                                                        module->exports.capacity * sizeof(uint8_t));
+                    
+                    // Realloc names array
+                    char** new_names = MODULES_NEW_ARRAY(char*, module->exports.capacity);
+                    memcpy(new_names, module->exports.names, old_capacity * sizeof(char*));
+                    MODULES_FREE(module->exports.names, old_capacity * sizeof(char*));
+                    module->exports.names = new_names;
+                    
+                    // Realloc values array
+                    TaggedValue* new_values = MODULES_NEW_ARRAY(TaggedValue, module->exports.capacity);
+                    memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
+                    MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
+                    module->exports.values = new_values;
+                    
+                    // Realloc visibility array
+                    uint8_t* new_visibility = MODULES_NEW_ARRAY(uint8_t, module->exports.capacity);
+                    memcpy(new_visibility, module->exports.visibility, old_capacity * sizeof(uint8_t));
+                    MODULES_FREE(module->exports.visibility, old_capacity * sizeof(uint8_t));
+                    module->exports.visibility = new_visibility;
                 }
-                module->exports.names[module->exports.count] = strdup(prop->key);
+                module->exports.names[module->exports.count] = STRINGS_STRDUP(prop->key);
                 module->exports.values[module->exports.count] = *prop->value;
                 module->exports.visibility[module->exports.count] = 1; // Public
                 module->exports.count++;
@@ -482,7 +482,7 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     
     // Clean up
     chunk_free(chunk);
-    free(chunk);
+    BYTECODE_FREE(chunk, sizeof(Chunk));
     module_archive_destroy(archive);
     
     return module;
@@ -504,6 +504,9 @@ bool ensure_module_initialized(Module* module, VM* vm) {
     
     if (module->state == MODULE_STATE_UNLOADED && module->chunk) {
         fprintf(stderr, "[DEBUG] Initializing lazy-loaded module: %s\n", module->path);
+        
+        Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+        Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
         
         // Mark as loading to prevent circular initialization
         module->state = MODULE_STATE_LOADING;
@@ -527,11 +530,11 @@ bool ensure_module_initialized(Module* module, VM* vm) {
             // Copy module globals
             module->globals.count = module_vm.globals.count;
             module->globals.capacity = module_vm.globals.capacity;
-            module->globals.names = malloc(sizeof(char*) * module->globals.capacity);
-            module->globals.values = malloc(sizeof(TaggedValue) * module->globals.capacity);
+            module->globals.names = MODULES_NEW_ARRAY(char*, module->globals.capacity);
+            module->globals.values = MODULES_NEW_ARRAY(TaggedValue, module->globals.capacity);
             
             for (size_t i = 0; i < module->globals.count; i++) {
-                module->globals.names[i] = strdup(module_vm.globals.names[i]);
+                module->globals.names[i] = STRINGS_STRDUP(module_vm.globals.names[i]);
                 module->globals.values[i] = module_vm.globals.values[i];
             }
             
@@ -543,15 +546,26 @@ bool ensure_module_initialized(Module* module, VM* vm) {
                         AS_FUNCTION(*prop->value)->module = module;
                     }
                     if (module->exports.count >= module->exports.capacity) {
+                        size_t old_capacity = module->exports.capacity;
                         module->exports.capacity *= 2;
-                        module->exports.names = realloc(module->exports.names, 
-                                                       module->exports.capacity * sizeof(char*));
-                        module->exports.values = realloc(module->exports.values,
-                                                        module->exports.capacity * sizeof(TaggedValue));
-                        module->exports.visibility = realloc(module->exports.visibility,
-                                                            module->exports.capacity * sizeof(uint8_t));
+                        
+                        // Realloc arrays
+                        char** new_names = MODULES_NEW_ARRAY(char*, module->exports.capacity);
+                        memcpy(new_names, module->exports.names, old_capacity * sizeof(char*));
+                        MODULES_FREE(module->exports.names, old_capacity * sizeof(char*));
+                        module->exports.names = new_names;
+                        
+                        TaggedValue* new_values = MODULES_NEW_ARRAY(TaggedValue, module->exports.capacity);
+                        memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
+                        MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
+                        module->exports.values = new_values;
+                        
+                        uint8_t* new_visibility = MODULES_NEW_ARRAY(uint8_t, module->exports.capacity);
+                        memcpy(new_visibility, module->exports.visibility, old_capacity * sizeof(uint8_t));
+                        MODULES_FREE(module->exports.visibility, old_capacity * sizeof(uint8_t));
+                        module->exports.visibility = new_visibility;
                     }
-                    module->exports.names[module->exports.count] = strdup(prop->key);
+                    module->exports.names[module->exports.count] = STRINGS_STRDUP(prop->key);
                     module->exports.values[module->exports.count] = *prop->value;
                     module->exports.visibility[module->exports.count] = 1;
                     module->exports.count++;
@@ -579,8 +593,9 @@ bool ensure_module_initialized(Module* module, VM* vm) {
         vm_free(&module_vm);
         
         // Don't need the chunk anymore
+        Allocator* bc_alloc = allocators_get(ALLOC_SYSTEM_BYTECODE);
         chunk_free(module->chunk);
-        free(module->chunk);
+        BYTECODE_FREE(module->chunk, sizeof(Chunk));
         module->chunk = NULL;
         
         return module->state == MODULE_STATE_LOADED;
@@ -590,6 +605,8 @@ bool ensure_module_initialized(Module* module, VM* vm) {
 }
 
 static char* resolve_module_path(ModuleLoader* loader, const char* path, const char* relative_to) {
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // First, try to resolve through package system
     if (loader->package_system) {
         char* resolved = package_resolve_module_path(loader->package_system, path);
@@ -625,7 +642,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
                 if (getenv("SWIFTLANG_DEBUG")) {
                     printf("DEBUG: Found module directory at %s\n", buffer);
                 }
-                return strdup(buffer);
+                return STRINGS_STRDUP(buffer);
             }
             
             // Try as .swiftmodule archive
@@ -634,7 +651,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
                 if (getenv("SWIFTLANG_DEBUG")) {
                     printf("DEBUG: Found .swiftmodule at %s\n", buffer);
                 }
-                return strdup(buffer);
+                return STRINGS_STRDUP(buffer);
             }
             
             // Try in modules subdirectory
@@ -643,7 +660,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
                 if (getenv("SWIFTLANG_DEBUG")) {
                     printf("DEBUG: Found .swiftmodule in modules/ at %s\n", buffer);
                 }
-                return strdup(buffer);
+                return STRINGS_STRDUP(buffer);
             }
             
             // Try as .swift file
@@ -652,7 +669,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
                 if (getenv("SWIFTLANG_DEBUG")) {
                     printf("DEBUG: Found .swift file at %s\n", buffer);
                 }
-                return strdup(buffer);
+                return STRINGS_STRDUP(buffer);
             }
         }
         
@@ -663,7 +680,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
             if (getenv("SWIFTLANG_DEBUG")) {
                 printf("DEBUG: Found .swiftmodule in current dir at %s\n", buffer);
             }
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         // Check modules subdirectory in current directory
@@ -672,7 +689,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
             if (getenv("SWIFTLANG_DEBUG")) {
                 printf("DEBUG: Found .swiftmodule in modules/ subdir at %s\n", buffer);
             }
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         if (getenv("SWIFTLANG_DEBUG")) {
@@ -686,12 +703,12 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
     if (path[0] == '$') {
         // Native import - return the module name without $
         // The module loading system will handle finding the native module
-        return strdup(path + 1);  // Skip $ and return just the module name
+        return STRINGS_STRDUP(path + 1);  // Skip $ and return just the module name
     }
     
     // If path is absolute, use it directly
     if (path[0] == '/') {
-        return strdup(path);
+        return STRINGS_STRDUP(path);
     }
     
     char buffer[PATH_MAX];
@@ -734,13 +751,13 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
                 // Resolve relative path
                 snprintf(buffer, sizeof(buffer), "%s/%s", dir, path);
                 if (access(buffer, F_OK) == 0) {
-                    return strdup(buffer);
+                    return STRINGS_STRDUP(buffer);
                 }
                 
                 // Try with .swift extension
                 snprintf(buffer, sizeof(buffer), "%s/%s.swift", dir, path);
                 if (access(buffer, F_OK) == 0) {
-                    return strdup(buffer);
+                    return STRINGS_STRDUP(buffer);
                 }
             }
         }
@@ -759,7 +776,7 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
             snprintf(buffer, sizeof(buffer), "%s/native/%s.so", loader->search_paths.paths[i], native_name);
             #endif
             if (access(buffer, F_OK) == 0) {
-                return strdup(buffer);
+                return STRINGS_STRDUP(buffer);
             }
         }
         
@@ -767,38 +784,38 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
         snprintf(buffer, sizeof(buffer), "%s/%s/module.json", loader->search_paths.paths[i], converted_path);
         if (access(buffer, F_OK) == 0) {
             snprintf(buffer, sizeof(buffer), "%s/%s", loader->search_paths.paths[i], converted_path);
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         // Try as regular Swift module with converted path
         snprintf(buffer, sizeof(buffer), "%s/%s", loader->search_paths.paths[i], converted_path);
         if (access(buffer, F_OK) == 0) {
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         // Try with .swift extension
         snprintf(buffer, sizeof(buffer), "%s/%s.swift", loader->search_paths.paths[i], converted_path);
         if (access(buffer, F_OK) == 0) {
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         // Also try with original dotted path for backward compatibility
         snprintf(buffer, sizeof(buffer), "%s/%s.swift", loader->search_paths.paths[i], search_path);
         if (access(buffer, F_OK) == 0) {
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
         
         // Try as .swiftmodule archive
         snprintf(buffer, sizeof(buffer), "%s/%s.swiftmodule", loader->search_paths.paths[i], search_path);
         if (access(buffer, F_OK) == 0) {
-            return strdup(buffer);
+            return STRINGS_STRDUP(buffer);
         }
     }
     
     // Also check current directory for .swiftmodule
     snprintf(buffer, sizeof(buffer), "%s.swiftmodule", path);
     if (access(buffer, F_OK) == 0) {
-        return strdup(buffer);
+        return STRINGS_STRDUP(buffer);
     }
     
     return NULL;
@@ -808,17 +825,13 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
 ModuleLoader* module_loader_create_with_hierarchy(ModuleLoaderType type, const char* name, ModuleLoader* parent, VM* vm) {
     LOG_DEBUG(LOG_MODULE_MODULE_LOADER, "Creating module loader: type=%d, name=%s, parent=%p", 
               type, name ? name : "(null)", (void*)parent);
-    // fprintf(stderr, "[DEBUG] module_loader_create_with_hierarchy called: type=%d, name=%s, parent=%p, vm=%p\n",
-    //         type, name ? name : "(null)", parent, vm);
-    
-    ModuleLoader* loader = calloc(1, sizeof(ModuleLoader));
+
+
+    ModuleLoader* loader = MODULES_NEW_ZERO(ModuleLoader);
     loader->type = type;
-    loader->name = name ? strdup(name) : NULL;
+    loader->name = name ? STRINGS_STRDUP(name) : NULL;
     loader->parent = parent;
     loader->vm = vm;
-    
-    // fprintf(stderr, "[DEBUG] Created loader=%p with type=%d, name=%s\n", 
-    //         loader, loader->type, loader->name ? loader->name : "(null)");
     
     // Initialize module cache
     loader->cache = module_cache_create();
@@ -826,25 +839,15 @@ ModuleLoader* module_loader_create_with_hierarchy(ModuleLoaderType type, const c
     
     // Initialize search paths
     loader->search_paths.capacity = 8;
-    loader->search_paths.paths = calloc(loader->search_paths.capacity, sizeof(char*));
-    // fprintf(stderr, "[DEBUG] Initialized search paths with capacity=%zu\n", loader->search_paths.capacity);
+    loader->search_paths.paths = MODULES_NEW_ARRAY_ZERO(char*, loader->search_paths.capacity);
     
     // Only create package system for application loaders
     if (type == MODULE_LOADER_APPLICATION) {
-        // fprintf(stderr, "[DEBUG] Creating package system for APPLICATION loader\n");
         loader->package_system = package_system_create(vm);
-        // fprintf(stderr, "[DEBUG] Package system created: %p\n", loader->package_system);
-        
-        // fprintf(stderr, "[DEBUG] Loading root module.json\n");
         package_system_load_root(loader->package_system, "module.json");
-        
-        // fprintf(stderr, "[DEBUG] Initializing stdlib namespace\n");
         package_init_stdlib_namespace(loader->package_system);
-    } else {
-        // fprintf(stderr, "[DEBUG] Skipping package system creation for loader type %d\n", type);
     }
     
-    // fprintf(stderr, "[DEBUG] module_loader_create_with_hierarchy returning loader=%p\n", loader);
     return loader;
 }
 
@@ -884,11 +887,15 @@ ModuleLoader* module_loader_create(VM* vm) {
 void module_loader_destroy(ModuleLoader* loader) {
     if (!loader) return;
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Don't destroy parent loaders
     
     // Free name
     if (loader->name) {
-        free((char*)loader->name);
+        size_t name_len = strlen(loader->name) + 1;
+        STRINGS_FREE((char*)loader->name, name_len);
     }
     
     // Free cache
@@ -897,27 +904,35 @@ void module_loader_destroy(ModuleLoader* loader) {
     
     // Free search paths
     for (size_t i = 0; i < loader->search_paths.count; i++) {
-        free(loader->search_paths.paths[i]);
+        size_t path_len = strlen(loader->search_paths.paths[i]) + 1;
+        STRINGS_FREE(loader->search_paths.paths[i], path_len);
     }
-    free(loader->search_paths.paths);
+    MODULES_FREE(loader->search_paths.paths, loader->search_paths.capacity * sizeof(char*));
     
     // Free package system if present
     if (loader->package_system) {
         package_system_destroy(loader->package_system);
     }
     
-    free(loader);
+    MODULES_FREE(loader, sizeof(ModuleLoader));
 }
 
 
 // Add search path to module loader
 void module_loader_add_search_path(ModuleLoader* loader, const char* path) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     if (loader->search_paths.count >= loader->search_paths.capacity) {
+        size_t old_capacity = loader->search_paths.capacity;
         loader->search_paths.capacity *= 2;
-        loader->search_paths.paths = realloc(loader->search_paths.paths, 
-                                            loader->search_paths.capacity * sizeof(char*));
+        
+        char** new_paths = MODULES_NEW_ARRAY(char*, loader->search_paths.capacity);
+        memcpy(new_paths, loader->search_paths.paths, old_capacity * sizeof(char*));
+        MODULES_FREE(loader->search_paths.paths, old_capacity * sizeof(char*));
+        loader->search_paths.paths = new_paths;
     }
-    loader->search_paths.paths[loader->search_paths.count++] = strdup(path);
+    loader->search_paths.paths[loader->search_paths.count++] = STRINGS_STRDUP(path);
 }
 
 
@@ -945,49 +960,40 @@ Module* module_load(ModuleLoader* loader, const char* path, bool is_native) {
 }
 
 static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMetadata* metadata) {
-    // fprintf(stderr, "[DEBUG] Loading compiled module from: %s\n", metadata->compiled_path);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    Allocator* bc_alloc = allocators_get(ALLOC_SYSTEM_BYTECODE);
     
     ModuleArchive* archive = module_archive_open(metadata->compiled_path);
     if (!archive) {
-        // fprintf(stderr, "[DEBUG] Failed to open module archive: %s\n", metadata->compiled_path);
         return false;
     }
     
-    // fprintf(stderr, "[DEBUG] Successfully opened module archive\n");
-    
     // Extract native library if needed
     if (metadata->native.library) {
-        // fprintf(stderr, "[DEBUG] Module has native library: %s\n", metadata->native.library);
-        
         char temp_lib_path[PATH_MAX];
         snprintf(temp_lib_path, sizeof(temp_lib_path), "/tmp/swiftlang_%s_%d.dylib",
                 metadata->name, getpid());
         
         const char* platform = module_archive_get_platform();
-        // fprintf(stderr, "[DEBUG] Extracting native library for platform: %s to %s\n", platform, temp_lib_path);
         
         if (module_archive_extract_native_lib(archive, platform, temp_lib_path)) {
-            // fprintf(stderr, "[DEBUG] Native library extracted successfully\n");
             module->native_handle = dlopen(temp_lib_path, RTLD_LAZY | RTLD_LOCAL);
             if (!module->native_handle) {
-                // fprintf(stderr, "[ERROR] Failed to load extracted native library: %s\n", dlerror());
+                // Failed to load extracted native library
             } else {
-                // fprintf(stderr, "[DEBUG] Native library loaded successfully\n");
+                // Native library loaded successfully
             }
             // Mark for cleanup
-            module->temp_native_path = strdup(temp_lib_path);
-        } else {
-            // fprintf(stderr, "[ERROR] Failed to extract native library\n");
+            module->temp_native_path = STRINGS_STRDUP(temp_lib_path);
         }
     }
     
     // Load bytecode modules
     size_t entry_count = module_archive_get_entry_count(archive);
-    // fprintf(stderr, "[DEBUG] Module archive has %zu entries\n", entry_count);
     
     for (size_t i = 0; i < entry_count; i++) {
         const char* entry_name = module_archive_get_entry_name(archive, i);
-        // fprintf(stderr, "[DEBUG] Entry %zu: %s\n", i, entry_name);
         
         if (strstr(entry_name, "bytecode/") == entry_name && strstr(entry_name, ".swiftbc")) {
             // Extract module name
@@ -998,16 +1004,12 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
             strncpy(module_name, start, len);
             module_name[len] = '\0';
             
-            // fprintf(stderr, "[DEBUG] Found bytecode for module: %s\n", module_name);
-            
             // Load bytecode
             uint8_t* bytecode;
             size_t bytecode_size;
             if (module_archive_extract_bytecode(archive, module_name, &bytecode, &bytecode_size)) {
-                // fprintf(stderr, "[DEBUG] Loading bytecode for %s, size: %zu\n", module_name, bytecode_size);
-                
                 // Deserialize bytecode
-                Chunk* chunk = malloc(sizeof(Chunk));
+                Chunk* chunk = BYTECODE_NEW(Chunk);
                 chunk_init(chunk);
                 
                 // Read our simple format
@@ -1017,14 +1019,10 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
                 offset += sizeof(uint32_t);
                 
                 if (magic == 0x42434453) { // "BCDS"
-                    // fprintf(stderr, "[DEBUG] Valid bytecode magic found\n");
-                    
                     // Read constants
                     uint32_t const_count;
                     memcpy(&const_count, bytecode + offset, sizeof(uint32_t));
                     offset += sizeof(uint32_t);
-                    
-                    // fprintf(stderr, "[DEBUG] Constant count: %u\n", const_count);
                     
                     for (size_t i = 0; i < const_count; i++) {
                         TaggedValue value;
@@ -1043,14 +1041,14 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
                                 
                                 // Read string data
                                 if (string_len > 0) {
-                                    char* str = malloc(string_len + 1);
+                                    char* str = MODULES_ALLOC(string_len + 1);
                                     memcpy(str, bytecode + offset, string_len);
                                     str[string_len] = '\0';
                                     offset += string_len;
                                     
                                     // Intern the string
                                     value.as.string = string_pool_intern(&loader->vm->strings, str, string_len);
-                                    free(str);
+                                    MODULES_FREE(str, string_len + 1);
                                 } else {
                                     value.as.string = string_pool_intern(&loader->vm->strings, "", 0);
                                 }
@@ -1075,18 +1073,6 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
                         }
                         
                         chunk_add_constant(chunk, value);
-                        
-                        // Debug print the constant
-                        // fprintf(stderr, "[DEBUG] Constant %zu: type=%d, ", i, value.type);
-                        if (value.type == VAL_STRING) {
-                            // fprintf(stderr, "string=%s\n", value.as.string ? value.as.string : "(null)");
-                        } else if (value.type == VAL_NIL) {
-                            // fprintf(stderr, "nil\n");
-                        } else if (value.type == VAL_NUMBER) {
-                            // fprintf(stderr, "number=%f\n", value.as.number);
-                        } else {
-                            // fprintf(stderr, "other\n");
-                        }
                     }
                     
                     // Read code
@@ -1101,72 +1087,23 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
                     // Execute the module code to populate exports
                     VM* vm = loader->vm;
                     
-                    // fprintf(stderr, "[DEBUG] About to execute module bytecode for %s\n", module_name);
-                    
                     // Save VM state
                     Chunk* saved_chunk = vm->chunk;
                     
                     // Define __module_exports__ for this submodule
-                    if (!module->module_object) {
-                        // fprintf(stderr, "[ERROR] module->module_object is NULL!\n");
-                    } else {
-                        // // fprintf(stderr, "[DEBUG] module->module_object is at %p\n", module->module_object);
-                    }
                     define_global(vm, "__module_exports__", OBJECT_VAL(module->module_object));
-                    
-                    // // fprintf(stderr, "[DEBUG] Calling vm_interpret...\n");
-                    // fprintf(stderr, "[DEBUG] Chunk has %zu bytes of code\n", chunk->count);
-                    // fprintf(stderr, "[DEBUG] VM is at %p\n", (void*)vm);
-                    // fprintf(stderr, "[DEBUG] Chunk is at %p\n", (void*)chunk);
-                    
-                    // Print first few opcodes for debugging
-                    // fprintf(stderr, "[DEBUG] First opcodes:");
-                    for (size_t i = 0; i < chunk->count && i < 20; i++) {
-                        // fprintf(stderr, " %02x", chunk->code[i]);
-                    }
-                    // fprintf(stderr, "\n");
-                    
-                    // Validate opcodes reference valid constants
-                    for (size_t i = 0; i < chunk->count; i++) {
-                        uint8_t op = chunk->code[i];
-                        if (op == 0x00 || op == 0x20 || op == 0x1e) { // OP_CONSTANT, OP_GET_GLOBAL, OP_DEFINE_LOCAL
-                            if (i + 1 < chunk->count) {
-                                uint8_t idx = chunk->code[i + 1];
-                                if (idx >= chunk->constants.count) {
-                                    // fprintf(stderr, "[ERROR] Opcode at %zu references invalid constant %d (max %zu)\n", 
-                                    //         i, idx, chunk->constants.count);
-                                }
-                            }
-                        }
-                    }
-                    
-                    // Try to catch the crash
-                    if (!vm) {
-                        // fprintf(stderr, "[ERROR] VM is NULL!\n");
-                        return false;
-                    }
-                    
-                    if (!chunk || !chunk->code) {
-                        // fprintf(stderr, "[ERROR] Chunk or chunk->code is NULL!\n");
-                        return false;
-                    }
                     
                     // Execute bytecode
                     InterpretResult result;
                     // Skip empty chunks (just return)
                     if (chunk->count <= 2) {
-                        // fprintf(stderr, "[DEBUG] Skipping empty module bytecode\n");
                         result = INTERPRET_OK;
                     } else {
                         result = vm_interpret(vm, chunk);
                     }
                     
-                    // fprintf(stderr, "[DEBUG] vm_interpret returned: %d\n", result);
-                    
                     if (result != INTERPRET_OK) {
-                        // fprintf(stderr, "[ERROR] Failed to execute module bytecode: %s (result=%d)\n", module_name, result);
-                    } else {
-                        // fprintf(stderr, "[DEBUG] Module bytecode executed successfully\n");
+                        // Failed to execute module bytecode
                     }
                     
                     // Restore VM state
@@ -1175,10 +1112,9 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
                 }
                 
                 // Free the temporary chunk - it was only used for immediate execution
-                // The module's actual bytecode is stored separately if needed
                 chunk_free(chunk);
-                free(chunk);
-                free(bytecode);
+                BYTECODE_FREE(chunk, sizeof(Chunk));
+                MODULES_FREE(bytecode, bytecode_size);
             }
         }
     }
@@ -1188,16 +1124,12 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
 }
 
 Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata) {
-    // Temporarily disable debug output
-    // fprintf(stderr, "[DEBUG] load_module_from_metadata: %s\n", metadata->name);
-    // fprintf(stderr, "[DEBUG]   Path: %s\n", metadata->path);
-    // fprintf(stderr, "[DEBUG]   Compiled path: %s\n", metadata->compiled_path ? metadata->compiled_path : "(none)");
-    // fprintf(stderr, "[DEBUG]   Native library: %s\n", metadata->native.library ? metadata->native.library : "(none)");
-    // fprintf(stderr, "[DEBUG]   Export count: %zu\n", metadata->export_count);
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
-    Module* module = calloc(1, sizeof(Module));
-    module->path = strdup(metadata->name);
-    module->absolute_path = strdup(metadata->path);
+    Module* module = MODULES_NEW_ZERO(Module);
+    module->path = STRINGS_STRDUP(metadata->name);
+    module->absolute_path = STRINGS_STRDUP(metadata->path);
     module->state = MODULE_STATE_LOADING;
     module->is_native = metadata->native.library != NULL;
     module->scope = module_scope_create();
@@ -1207,9 +1139,9 @@ Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata
     
     // Initialize exports
     module->exports.capacity = metadata->export_count + 8;
-    module->exports.names = calloc(module->exports.capacity, sizeof(char*));
-    module->exports.values = calloc(module->exports.capacity, sizeof(TaggedValue));
-    module->exports.visibility = calloc(module->exports.capacity, sizeof(uint8_t));
+    module->exports.names = MODULES_NEW_ARRAY_ZERO(char*, module->exports.capacity);
+    module->exports.values = MODULES_NEW_ARRAY_ZERO(TaggedValue, module->exports.capacity);
+    module->exports.visibility = MODULES_NEW_ARRAY_ZERO(uint8_t, module->exports.capacity);
     
     // Create module object early
     module->module_object = object_create();
@@ -1230,24 +1162,16 @@ Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata
     for (size_t i = 0; i < metadata->export_count; i++) {
         ModuleExport* exp = &metadata->exports[i];
         
-        // fprintf(stderr, "[DEBUG] Processing export %zu: %s (type=%d)\n", i, exp->name, exp->type);
-        
         switch (exp->type) {
             case MODULE_EXPORT_CONSTANT:
-                // fprintf(stderr, "[DEBUG] Exporting constant: %s\n", exp->name);
                 module_export(module, exp->name, exp->constant_value);
                 break;
                 
             case MODULE_EXPORT_FUNCTION:
                 if (exp->native_name && native_handle) {
-                    // fprintf(stderr, "[DEBUG] Looking up native function: %s -> %s\n", exp->name, exp->native_name);
                     // Look up native function
                     void* sym = dlsym(native_handle, exp->native_name);
                     if (sym) {
-                        // fprintf(stderr, "[DEBUG] Found native symbol '%s' at %p\n", exp->native_name, sym);
-                        // dlsym returns the actual function pointer, not a GOT entry
-                        // Use it directly without dereferencing
-                        // fprintf(stderr, "[DEBUG] Final function pointer for '%s': %p\n", exp->name, sym);
                         NativeFn fn = (NativeFn)sym;
                         module_export(module, exp->name, NATIVE_VAL(fn));
                     } else {
@@ -1305,6 +1229,11 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     LOG_DEBUG(LOG_MODULE_MODULE_LOADER, "Loading module: path=%s, is_native=%d, relative_to=%s", 
               path, is_native, relative_to ? relative_to : "(null)");
     
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    Allocator* bc_alloc = allocators_get(ALLOC_SYSTEM_BYTECODE);
+    Allocator* ast_alloc = allocators_get(ALLOC_SYSTEM_AST);
+    
     if (getenv("SWIFTLANG_DEBUG")) {
         // fprintf(stderr, "[DEBUG] module_load_relative called with path: %s, is_native: %d\n", path, is_native);
     }
@@ -1335,7 +1264,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         if (slash) {
             // Extract package name and module name
             size_t pkg_len = slash - path;
-            char* pkg_name = malloc(pkg_len + 1);
+            char* pkg_name = MODULES_ALLOC(pkg_len + 1);
             strncpy(pkg_name, path, pkg_len);
             pkg_name[pkg_len] = '\0';
             
@@ -1348,11 +1277,11 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 Module* module = package_load_module_from_metadata(loader, metadata, module_name);
                 if (module) {
                     cache_module(loader, module);
-                    free(pkg_name);
+                    MODULES_FREE(pkg_name, pkg_len + 1);
                     return module;
                 }
             }
-            free(pkg_name);
+            MODULES_FREE(pkg_name, pkg_len + 1);
         } else {
             // Try regular package loading
             ModuleMetadata* metadata = package_get_module_metadata(loader->package_system, path);
@@ -1376,7 +1305,6 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         if (glob_result.gl_pathc > 0) {
             // Found in local cache - load from archive
             const char* archive_path = glob_result.gl_pathv[0];
-            // fprintf(stderr, "[DEBUG] Found module in cache: %s\n", archive_path);
             
             // Create a module that will load from archive
             Module* module = module_load_from_archive(loader, archive_path, path);
@@ -1420,11 +1348,8 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     }
     
     // Create module
-    // fprintf(stderr, "[DEBUG] Creating module for path: %s (absolute: %s, native: %s)\n", 
-    //         path, absolute_path, is_native ? "yes" : "no");
-    
-    Module* module = calloc(1, sizeof(Module));
-    module->path = strdup(path);
+    Module* module = MODULES_NEW_ZERO(Module);
+    module->path = STRINGS_STRDUP(path);
     module->absolute_path = absolute_path;
     module->state = MODULE_STATE_LOADING;
     module->is_native = is_native;
@@ -1432,13 +1357,12 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     module->ref_count = 0;
     pthread_mutex_init(&module->ref_mutex, NULL);
     module->last_access_time = time(NULL);
-    // fprintf(stderr, "[DEBUG] Created module %p for %s\n", module, path);
     
     // Initialize exports
     module->exports.capacity = 16;
-    module->exports.names = calloc(module->exports.capacity, sizeof(char*));
-    module->exports.values = calloc(module->exports.capacity, sizeof(TaggedValue));
-    module->exports.visibility = calloc(module->exports.capacity, sizeof(uint8_t));
+    module->exports.names = MODULES_NEW_ARRAY_ZERO(char*, module->exports.capacity);
+    module->exports.values = MODULES_NEW_ARRAY_ZERO(TaggedValue, module->exports.capacity);
+    module->exports.visibility = MODULES_NEW_ARRAY_ZERO(uint8_t, module->exports.capacity);
     
     // Cache the module early to handle circular dependencies
     cache_module(loader, module);
@@ -1496,8 +1420,6 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             return NULL;
         }
         
-        // fprintf(stderr, "[DEBUG] Native module loaded successfully: %s\n", path);
-        
         // Mark module as loaded
         module->state = MODULE_STATE_LOADED;
     }
@@ -1519,10 +1441,13 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 module->state = loaded->state;
                 module->is_native = loaded->is_native;
                 module->globals = loaded->globals;
-                free((void*)loaded->path);
-                free((void*)loaded->absolute_path);
-                free(loaded);
-                free(absolute_path);
+                size_t path_len = strlen(loaded->path) + 1;
+                STRINGS_FREE((void*)loaded->path, path_len);
+                size_t abs_path_len = strlen(loaded->absolute_path) + 1;
+                STRINGS_FREE((void*)loaded->absolute_path, abs_path_len);
+                MODULES_FREE(loaded, sizeof(Module));
+                size_t abs_path_len2 = strlen(absolute_path) + 1;
+                STRINGS_FREE(absolute_path, abs_path_len2);
                 return module;
             }
             fprintf(stderr, "Failed to load module from archive: %s\n", absolute_path);
@@ -1551,9 +1476,9 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             // Initialize exports if not already done
             if (!module->exports.names && dir_metadata->export_count > 0) {
                 module->exports.capacity = dir_metadata->export_count + 8;
-                module->exports.names = calloc(module->exports.capacity, sizeof(char*));
-                module->exports.values = calloc(module->exports.capacity, sizeof(TaggedValue));
-                module->exports.visibility = calloc(module->exports.capacity, sizeof(uint8_t));
+                module->exports.names = MODULES_NEW_ARRAY_ZERO(char*, module->exports.capacity);
+                module->exports.values = MODULES_NEW_ARRAY_ZERO(TaggedValue, module->exports.capacity);
+                module->exports.visibility = MODULES_NEW_ARRAY_ZERO(uint8_t, module->exports.capacity);
             }
             
             // Load native library if specified in metadata
@@ -1615,21 +1540,22 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             // Free metadata
             package_free_module_metadata(dir_metadata);
             
-            file_path_to_load = strdup(main_path);
+            file_path_to_load = STRINGS_STRDUP(main_path);
             
             if (getenv("SWIFTLANG_DEBUG")) {
                 // fprintf(stderr, "[DEBUG] Loading module main file: %s\n", file_path_to_load);
             }
         } else {
             // Not a directory, load as regular file
-            file_path_to_load = strdup(absolute_path);
+            file_path_to_load = STRINGS_STRDUP(absolute_path);
         }
         
         // Load the file (either main file from directory or direct file)
         FILE* file = fopen(file_path_to_load, "r");
         if (!file) {
             fprintf(stderr, "Failed to open module file: %s\n", file_path_to_load);
-            free(file_path_to_load);
+            size_t file_path_len = strlen(file_path_to_load) + 1;
+            STRINGS_FREE(file_path_to_load, file_path_len);
             module->state = MODULE_STATE_ERROR;
             return NULL;
         }
@@ -1639,11 +1565,12 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         long file_size = ftell(file);
         fseek(file, 0, SEEK_SET);
         
-        source = malloc(file_size + 1);
+        source = MODULES_ALLOC(file_size + 1);
         if (!source) {
             fprintf(stderr, "Failed to allocate memory for module source\n");
             fclose(file);
-            free(file_path_to_load);
+            size_t file_path_len = strlen(file_path_to_load) + 1;
+            STRINGS_FREE(file_path_to_load, file_path_len);
             module->state = MODULE_STATE_ERROR;
             return NULL;
         }
@@ -1656,7 +1583,8 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             // fprintf(stderr, "[DEBUG] Read %ld bytes of module source from %s\n", read_size, file_path_to_load);
         }
         
-        free(file_path_to_load);
+        size_t file_path_len = strlen(file_path_to_load) + 1;
+        STRINGS_FREE(file_path_to_load, file_path_len);
         
         // Get file modification time for cache invalidation
         struct stat file_stat_cache;
@@ -1668,7 +1596,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         char cache_path[PATH_MAX];
         const char* home = getenv("HOME");
         bool loaded_from_cache = false;
-        Chunk* module_chunk = malloc(sizeof(Chunk));
+        Chunk* module_chunk = BYTECODE_NEW(Chunk);
         chunk_init(module_chunk);
         
         if (home) {
@@ -1678,11 +1606,12 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             mkdir(cache_dir, 0755);
             
             // Generate cache filename based on module path and mtime
-            char* path_copy = strdup(absolute_path);
+            char* path_copy = STRINGS_STRDUP(absolute_path);
             char* module_name = basename(path_copy);
             snprintf(cache_path, sizeof(cache_path), "%s/%s-%ld.swiftbc", 
                      cache_dir, module_name, file_stat_cache.st_mtime);
-            free(path_copy);
+            size_t path_copy_len = strlen(path_copy) + 1;
+            STRINGS_FREE(path_copy, path_copy_len);
             
             // Try to load from cache
             FILE* cache_file = fopen(cache_path, "rb");
@@ -1691,7 +1620,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 size_t cache_size = ftell(cache_file);
                 fseek(cache_file, 0, SEEK_SET);
                 
-                uint8_t* cache_data = malloc(cache_size);
+                uint8_t* cache_data = MODULES_ALLOC(cache_size);
                 if (fread(cache_data, 1, cache_size, cache_file) == cache_size) {
                     if (bytecode_deserialize(cache_data, cache_size, module_chunk)) {
                         loaded_from_cache = true;
@@ -1700,7 +1629,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                         }
                     }
                 }
-                free(cache_data);
+                MODULES_FREE(cache_data, cache_size);
                 fclose(cache_file);
             }
         }
@@ -1708,7 +1637,6 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         // If not loaded from cache, parse and compile
         if (!loaded_from_cache) {
             // Parse the module source
-            // fprintf(stderr, "[DEBUG] Parsing module source...\n");
             Lexer* lexer = lexer_create(source);
             Parser* parser = parser_create(source);
             
@@ -1718,9 +1646,9 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 ast_free_program(program);
                 lexer_destroy(lexer);
                 parser_destroy(parser);
-                free(source);
+                MODULES_FREE(source, file_size + 1);
                 chunk_free(module_chunk);
-                free(module_chunk);
+                BYTECODE_FREE(module_chunk, sizeof(Chunk));
                 module->state = MODULE_STATE_ERROR;
                 return NULL;
             }
@@ -1738,10 +1666,10 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 fprintf(stderr, "Failed to compile module: %s\n", absolute_path);
                 ast_free_program(program);
                 chunk_free(module_chunk);
-                free(module_chunk);
+                BYTECODE_FREE(module_chunk, sizeof(Chunk));
                 lexer_destroy(lexer);
                 parser_destroy(parser);
-                free(source);
+                MODULES_FREE(source, file_size + 1);
                 module->state = MODULE_STATE_ERROR;
                 return NULL;
             }
@@ -1760,7 +1688,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                             fprintf(stderr, "[DEBUG] Saved module to cache: %s\n", cache_path);
                         }
                     }
-                    free(bytecode_data);
+                    MODULES_FREE(bytecode_data, bytecode_size);
                 }
             }
             
@@ -1781,18 +1709,13 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         TaggedValue* saved_stack_top = vm->stack_top;
         const char* saved_module_path = vm->current_module_path;
         Chunk* saved_chunk = vm->chunk;
-        // int saved_global_count = vm->globals.count;  // Track globals before module execution
-        
         
         // Set current module path for relative imports
         vm->current_module_path = module->absolute_path;
         
         // Create a new VM instance for module execution
-        // // fprintf(stderr, "[DEBUG] Creating module VM...\n");
         VM module_vm;
         vm_init_with_loader(&module_vm, loader);
-        // fprintf(stderr, "[DEBUG] module_vm at %p, module at %p\n", &module_vm, module);
-        // fprintf(stderr, "[DEBUG] Before vm_init complete: module state=%d\n", module->state);
         
         // Copy necessary state
         module_vm.current_module_path = module->absolute_path;
@@ -1822,8 +1745,6 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             // The exports are now in module->module_object via OP_MODULE_EXPORT
             // Copy them to the exports array for compatibility
             
-            // fprintf(stderr, "[DEBUG] Module executed successfully\n");
-            
             // Iterate over module object properties and add to exports array
             if (module->module_object) {
                 if (getenv("SWIFTLANG_DEBUG")) {
@@ -1842,13 +1763,20 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                     }
                     // Add to exports array
                     if (module->exports.count >= module->exports.capacity) {
+                        size_t old_capacity = module->exports.capacity;
                         module->exports.capacity *= 2;
-                        module->exports.names = realloc(module->exports.names, 
-                                                       module->exports.capacity * sizeof(char*));
-                        module->exports.values = realloc(module->exports.values,
-                                                        module->exports.capacity * sizeof(TaggedValue));
+                        
+                        char** new_names = MODULES_NEW_ARRAY(char*, module->exports.capacity);
+                        memcpy(new_names, module->exports.names, old_capacity * sizeof(char*));
+                        MODULES_FREE(module->exports.names, old_capacity * sizeof(char*));
+                        module->exports.names = new_names;
+                        
+                        TaggedValue* new_values = MODULES_NEW_ARRAY(TaggedValue, module->exports.capacity);
+                        memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
+                        MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
+                        module->exports.values = new_values;
                     }
-                    module->exports.names[module->exports.count] = strdup(prop->key);
+                    module->exports.names[module->exports.count] = STRINGS_STRDUP(prop->key);
                     module->exports.values[module->exports.count] = *prop->value;
                     
                     // If exporting a function, ensure it has a reference to this module
@@ -1870,35 +1798,21 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             }
             
             module->state = MODULE_STATE_LOADED;
-            // fprintf(stderr, "[DEBUG] Module loaded with %zu exports, state=%d\n", module->exports.count, module->state);
             
             // Copy module globals before destroying the VM
-            // fprintf(stderr, "[DEBUG] Module VM has %zu globals total\n", module_vm.globals.count);
-            for (size_t i = 0; i < module_vm.globals.count; i++) {
-                // fprintf(stderr, "[DEBUG]   Global %zu: '%s'\n", i, module_vm.globals.names[i]);
-            }
-            
             module->globals.count = module_vm.globals.count;
             module->globals.capacity = module_vm.globals.capacity;
-            module->globals.names = malloc(sizeof(char*) * module->globals.capacity);
-            module->globals.values = malloc(sizeof(TaggedValue) * module->globals.capacity);
+            module->globals.names = MODULES_NEW_ARRAY(char*, module->globals.capacity);
+            module->globals.values = MODULES_NEW_ARRAY(TaggedValue, module->globals.capacity);
             
             for (size_t i = 0; i < module->globals.count; i++) {
-                module->globals.names[i] = strdup(module_vm.globals.names[i]);
+                module->globals.names[i] = STRINGS_STRDUP(module_vm.globals.names[i]);
                 module->globals.values[i] = module_vm.globals.values[i];
-                // fprintf(stderr, "[DEBUG] Preserved global '%s'\n", module->globals.names[i]);
             }
             
-            // fprintf(stderr, "[DEBUG] Preserved %zu module globals\n", module->globals.count);
-            
-            // fprintf(stderr, "[DEBUG] Before vm cleanup: module=%p state=%d\n", module, module->state);
             // Clean up module VM - but don't destroy the shared module loader!
-            // Save the module loader before freeing
-            // ModuleLoader* saved_loader = module_vm.module_loader;
             module_vm.module_loader = NULL;  // Prevent vm_free from destroying it
             vm_free(&module_vm);
-            // Note: The module loader is still owned by the parent VM
-            // fprintf(stderr, "[DEBUG] After vm cleanup: module=%p state=%d\n", module, module->state);
         }
         
         // Restore VM state
@@ -1907,23 +1821,12 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         vm->current_module_path = saved_module_path;
         vm->chunk = saved_chunk;
         
-        // Clean up __module_exports__ global
-        // undefine_global(vm, "__module_exports__");
-        
         // Clean up
-        // fprintf(stderr, "[DEBUG] Before chunk_free: module=%p state=%d\n", module, module->state);
         chunk_free(module_chunk);
-        // fprintf(stderr, "[DEBUG] After chunk_free: module=%p state=%d\n", module, module->state);
-        free(module_chunk);
-        // fprintf(stderr, "[DEBUG] After free module_chunk: module=%p state=%d\n", module, module->state);
-        free(source);
-        // fprintf(stderr, "[DEBUG] After all cleanup: module=%p state=%d\n", module, module->state);
-        
-        // fprintf(stderr, "[DEBUG] Module cleanup complete\n");
+        BYTECODE_FREE(module_chunk, sizeof(Chunk));
+        MODULES_FREE(source, file_size + 1);
     }
     
-    // fprintf(stderr, "[DEBUG] About to return module: %p with state=%d\n", module, module ? module->state : -1);
-    // fprintf(stderr, "[DEBUG] Returning module: %p with state=%d\n", module, module ? module->state : -1);
     return module;
 }
 
@@ -1933,6 +1836,7 @@ Module* module_load_native(ModuleLoader* loader, const char* path) {
 
 // Module export with visibility support
 void module_export_with_visibility(Module* module, const char* name, TaggedValue value, uint8_t visibility) {
+
     // Check if already exported
     for (size_t i = 0; i < module->exports.count; i++) {
         if (strcmp(module->exports.names[i], name) == 0) {
@@ -1948,16 +1852,26 @@ void module_export_with_visibility(Module* module, const char* name, TaggedValue
     
     // Add new export
     if (module->exports.count >= module->exports.capacity) {
+        size_t old_capacity = module->exports.capacity;
         module->exports.capacity *= 2;
-        module->exports.names = realloc(module->exports.names,
-                                       module->exports.capacity * sizeof(char*));
-        module->exports.values = realloc(module->exports.values,
-                                        module->exports.capacity * sizeof(TaggedValue));
-        module->exports.visibility = realloc(module->exports.visibility,
-                                           module->exports.capacity * sizeof(uint8_t));
+        
+        char** new_names = MODULES_NEW_ARRAY(char*, module->exports.capacity);
+        memcpy(new_names, module->exports.names, old_capacity * sizeof(char*));
+        MODULES_FREE(module->exports.names, old_capacity * sizeof(char*));
+        module->exports.names = new_names;
+        
+        TaggedValue* new_values = MODULES_NEW_ARRAY(TaggedValue, module->exports.capacity);
+        memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
+        MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
+        module->exports.values = new_values;
+        
+        uint8_t* new_visibility = MODULES_NEW_ARRAY(uint8_t, module->exports.capacity);
+        memcpy(new_visibility, module->exports.visibility, old_capacity * sizeof(uint8_t));
+        MODULES_FREE(module->exports.visibility, old_capacity * sizeof(uint8_t));
+        module->exports.visibility = new_visibility;
     }
     
-    module->exports.names[module->exports.count] = strdup(name);
+    module->exports.names[module->exports.count] = STRINGS_STRDUP(name);
     module->exports.values[module->exports.count] = value;
     module->exports.visibility[module->exports.count] = visibility;
     module->exports.count++;
@@ -1970,6 +1884,9 @@ void module_export_with_visibility(Module* module, const char* name, TaggedValue
 
 // Standard module export (defaults to public)
 void module_export(Module* module, const char* name, TaggedValue value) {
+    Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
+    Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
     // Check if already exported
     for (size_t i = 0; i < module->exports.count; i++) {
         if (strcmp(module->exports.names[i], name) == 0) {
@@ -1980,14 +1897,21 @@ void module_export(Module* module, const char* name, TaggedValue value) {
     
     // Add new export
     if (module->exports.count >= module->exports.capacity) {
+        size_t old_capacity = module->exports.capacity;
         module->exports.capacity *= 2;
-        module->exports.names = realloc(module->exports.names,
-                                       module->exports.capacity * sizeof(char*));
-        module->exports.values = realloc(module->exports.values,
-                                        module->exports.capacity * sizeof(TaggedValue));
+        
+        char** new_names = MODULES_NEW_ARRAY(char*, module->exports.capacity);
+        memcpy(new_names, module->exports.names, old_capacity * sizeof(char*));
+        MODULES_FREE(module->exports.names, old_capacity * sizeof(char*));
+        module->exports.names = new_names;
+        
+        TaggedValue* new_values = MODULES_NEW_ARRAY(TaggedValue, module->exports.capacity);
+        memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
+        MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
+        module->exports.values = new_values;
     }
     
-    module->exports.names[module->exports.count] = strdup(name);
+    module->exports.names[module->exports.count] = STRINGS_STRDUP(name);
     module->exports.values[module->exports.count] = value;
     module->exports.count++;
 }
@@ -2014,16 +1938,7 @@ void module_register_native_function(Module* module, const char* name, NativeFn 
     module_export(module, name, NATIVE_VAL(fn));
 }
 
-// Example standard library initialization
-void module_loader_init_stdlib(ModuleLoader* loader) {
-    (void)loader;  // Unused parameter
-    // This would load built-in modules like:
-    // - math
-    // - string
-    // - array
-    // - file
-    // - etc.
-}
+
 
 /**
  * Check if a module version satisfies a requirement.

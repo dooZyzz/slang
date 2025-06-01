@@ -279,7 +279,7 @@ void cli_print_banner(void) {
     
     printf("\n");
     printf(COLOR_CYAN "┌─────────────────────────────────────────┐\n" COLOR_RESET);
-    printf(COLOR_CYAN "│ " COLOR_BOLD COLOR_WHITE "SwiftLang Programming Language" COLOR_RESET COLOR_CYAN "         │\n" COLOR_RESET);
+    printf(COLOR_CYAN "│ " COLOR_BOLD COLOR_WHITE "SwiftLang Programming Language" COLOR_RESET COLOR_CYAN "          │\n" COLOR_RESET);
     printf(COLOR_CYAN "│ " COLOR_RESET "A modern, fast, and expressive language" COLOR_CYAN " │\n" COLOR_RESET);
     printf(COLOR_CYAN "└─────────────────────────────────────────┘\n" COLOR_RESET);
     printf("\n");
