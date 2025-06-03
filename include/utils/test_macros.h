@@ -21,16 +21,7 @@
 
 // Test suite definition macro
 #define TEST_SUITE(suite_name) \
-    static TestCase suite_name##_test_cases[]; \
-    static size_t suite_name##_test_count; \
     static const char* suite_name##_suite_name = #suite_name; \
-    \
-    TEST_API TestSuite* run_##suite_name##_tests(void) { \
-        TestSuite* suite = test_suite_create(suite_name##_suite_name); \
-        test_suite_run(suite, suite_name##_test_cases, suite_name##_test_count); \
-        return suite; \
-    } \
-    \
     static TestCase suite_name##_test_cases[] = {
 
 // Test case definition macro
@@ -42,6 +33,12 @@
     }; \
     static size_t suite_name##_test_count = \
         sizeof(suite_name##_test_cases) / sizeof(suite_name##_test_cases[0]); \
+    \
+    TEST_API TestSuite* run_##suite_name##_tests(void) { \
+        TestSuite* suite = test_suite_create(suite_name##_suite_name); \
+        test_suite_run(suite, suite_name##_test_cases, suite_name##_test_count); \
+        return suite; \
+    } \
     \
     /* Automatically add main function when building as standalone */ \
     TEST_STANDALONE_MAIN_IF_ENABLED(suite_name)

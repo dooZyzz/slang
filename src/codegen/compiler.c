@@ -1299,6 +1299,8 @@ static void* compile_function_stmt(ASTVisitor* visitor, Stmt* stmt) {
     
     // Check if this is an extension method (name contains "_ext_")
     if (strstr(func->name, "_ext_") != NULL) {
+        fprintf(stderr, "[DEBUG] Compiling extension method: %s\n", func->name);
+        
         // Extract the type name and method name
         char* type_end = strstr(func->name, "_ext_");
         size_t type_len = type_end - func->name;
@@ -1309,12 +1311,29 @@ static void* compile_function_stmt(ASTVisitor* visitor, Stmt* stmt) {
         
         char* method_name = type_end + 5; // Skip "_ext_"
         
+        fprintf(stderr, "[DEBUG] Extension type: %s, method: %s\n", type_name, method_name);
+        
         // Check if this is a built-in type or a struct type
-        if (strcmp(type_name, "Number") == 0 || 
-            strcmp(type_name, "String") == 0 || 
-            strcmp(type_name, "Array") == 0) {
-            // Built-in types use object prototype
+        if (strcmp(type_name, "Number") == 0) {
+            // Number prototype
             emit_byte(OP_GET_OBJECT_PROTO);
+            emit_byte(3); // Number type ID
+        } else if (strcmp(type_name, "String") == 0) {
+            // String prototype
+            emit_byte(OP_GET_OBJECT_PROTO);
+            emit_byte(2); // String type ID
+        } else if (strcmp(type_name, "Array") == 0) {
+            // Array prototype
+            emit_byte(OP_GET_OBJECT_PROTO);
+            emit_byte(1); // Array type ID
+        } else if (strcmp(type_name, "Object") == 0) {
+            // Object prototype
+            emit_byte(OP_GET_OBJECT_PROTO);
+            emit_byte(0); // Object type ID
+        } else if (strcmp(type_name, "Function") == 0) {
+            // Function prototype
+            emit_byte(OP_GET_OBJECT_PROTO);
+            emit_byte(4); // Function type ID
         } else {
             // Struct types use their own prototypes
             emit_constant(create_string_value(type_name));
@@ -1322,16 +1341,21 @@ static void* compile_function_stmt(ASTVisitor* visitor, Stmt* stmt) {
         }
         
         // Push the method name
+        fprintf(stderr, "[DEBUG] About to emit method name constant: %s\n", method_name);
         emit_constant(create_string_value(method_name));
         
         // Push the function value again
+        fprintf(stderr, "[DEBUG] About to emit function value constant\n");
         emit_constant(func_val);
         
         // Set property on prototype
+        fprintf(stderr, "[DEBUG] About to emit OP_SET_PROPERTY\n");
         emit_byte(OP_SET_PROPERTY);
         emit_byte(OP_POP); // Pop the result
         
+        fprintf(stderr, "[DEBUG] About to free type_name\n");
         SLANG_MEM_FREE(alloc, type_name, type_len + 1);
+        fprintf(stderr, "[DEBUG] Extension method setup complete\n");
     }
     
     // Clean up function compiler internals (but not the function itself)

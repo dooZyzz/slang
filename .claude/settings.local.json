@@ -63,7 +63,24 @@
       "Bash(../build/swift_like_lang init)",
       "Bash(../build/swift_like_lang build)",
       "Bash(../build/swift_like_lang test_basic.swift)",
-      "Bash(../build/swift_like_lang fibonacci_app.swift)"
+      "Bash(../build/swift_like_lang fibonacci_app.swift)",
+      "Bash(./check_opcodes)",
+      "Bash(awk:*)",
+      "Bash(./swift_like_lang test_object_literal.swift)",
+      "Bash(./swift_like_lang -d test_object_literal.swift)",
+      "Bash(./swift_like_lang:*)",
+      "Bash(./build_debug/swift_like_lang examples/01-basics/main.swift)",
+      "Bash(./build_debug/swift_like_lang examples/03-extensions/simple.swift)",
+      "Bash(./build_debug/swift_like_lang examples/05-closures/main.swift)",
+      "Bash(./test_comprehensive_leak:*)",
+      "Bash(./test_gc)",
+      "Bash(./test_gc_simple)",
+      "Bash(./build_debug/swift_like_lang:*)",
+      "Bash(timeout:*)",
+      "Bash(export SWIFTLANG_LOG_MODULES=gc)",
+      "Bash(export SWIFTLANG_LOG_LEVEL=debug)",
+      "Bash(nm:*)",
+      "Bash(dir:*)"
     ]
   },
   "enableAllProjectMcpServers": false

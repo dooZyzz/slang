@@ -10,6 +10,7 @@ typedef struct Object Object;
 typedef struct ObjectProperty ObjectProperty;
 typedef struct StructType StructType;
 typedef struct StructInstance StructInstance;
+typedef struct VM VM;
 
 // Object property - linked list node
 struct ObjectProperty {
@@ -90,5 +91,8 @@ TaggedValue* struct_instance_get_field(StructInstance* instance, const char* fie
 void struct_instance_set_field(StructInstance* instance, const char* field_name, TaggedValue value);
 TaggedValue* struct_instance_get_field_by_index(StructInstance* instance, size_t index);
 void struct_instance_set_field_by_index(StructInstance* instance, size_t index, TaggedValue value);
+
+// Set the current VM for GC-aware object allocation
+void object_set_current_vm(VM* vm);
 
 #endif

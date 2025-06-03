@@ -10,124 +10,140 @@
 #define STACK_MAX 256
 #define FRAMES_MAX 64
 
+#define STACK_MAX 256
+#define FRAMES_MAX 64
+
 typedef enum {
     // Constants
-    OP_CONSTANT,
-    OP_NIL,
-    OP_TRUE,
-    OP_FALSE,
-    
+    OP_CONSTANT = 0,
+    OP_NIL = 1,
+    OP_TRUE = 2,
+    OP_FALSE = 3,
+
     // Stack operations
-    OP_POP,
-    OP_DUP,
-    OP_SWAP,
-    
+    OP_POP = 4,
+    OP_DUP = 5,
+    OP_SWAP = 6,
+
     // Arithmetic
-    OP_ADD,
-    OP_SUBTRACT,
-    OP_MULTIPLY,
-    OP_DIVIDE,
-    OP_MODULO,
-    OP_NEGATE,
-    
+    OP_ADD = 7,
+    OP_SUBTRACT = 8,
+    OP_MULTIPLY = 9,
+    OP_DIVIDE = 10,
+    OP_MODULO = 11,
+    OP_NEGATE = 12,
+
     // Comparison
-    OP_EQUAL,
-    OP_NOT_EQUAL,
-    OP_GREATER,
-    OP_GREATER_EQUAL,
-    OP_LESS,
-    OP_LESS_EQUAL,
-    
+    OP_EQUAL = 13,
+    OP_NOT_EQUAL = 14,
+    OP_GREATER = 15,
+    OP_GREATER_EQUAL = 16,
+    OP_LESS = 17,
+    OP_LESS_EQUAL = 18,
+
     // Logical
-    OP_NOT,
-    OP_AND,
-    OP_OR,
-    
+    OP_NOT = 19,
+    OP_AND = 20,
+    OP_OR = 21,
+
     // Bitwise
-    OP_BIT_AND,
-    OP_BIT_OR,
-    OP_BIT_XOR,
-    OP_BIT_NOT,
-    OP_SHIFT_LEFT,
-    OP_SHIFT_RIGHT,
-    
+    OP_BIT_AND = 22,
+    OP_BIT_OR = 23,
+    OP_BIT_XOR = 24,
+    OP_BIT_NOT = 25,
+    OP_SHIFT_LEFT = 26,
+    OP_SHIFT_RIGHT = 27,
+
     // Variables
-    OP_GET_LOCAL,
-    OP_SET_LOCAL,
-    OP_GET_GLOBAL,
-    OP_SET_GLOBAL,
-    OP_DEFINE_GLOBAL,
-    OP_GET_UPVALUE,
-    OP_SET_UPVALUE,
-    OP_CLOSE_UPVALUE,
-    
+    OP_GET_LOCAL = 28,
+    OP_SET_LOCAL = 29,
+    OP_GET_GLOBAL = 30,
+    OP_SET_GLOBAL = 31,
+    OP_DEFINE_GLOBAL = 32,
+    OP_GET_UPVALUE = 33,
+    OP_SET_UPVALUE = 34,
+    OP_CLOSE_UPVALUE = 35,
+
     // Control flow
-    OP_JUMP,
-    OP_JUMP_IF_FALSE,
-    OP_JUMP_IF_TRUE,
-    OP_LOOP,
-    
+    OP_JUMP = 36,
+    OP_JUMP_IF_FALSE = 37,
+    OP_JUMP_IF_TRUE = 38,
+    OP_LOOP = 39,
+
     // Functions
-    OP_FUNCTION,
-    OP_CLOSURE,
-    OP_CALL,
-    OP_METHOD_CALL,
-    OP_RETURN,
-    OP_LOAD_BUILTIN,
-    
+    OP_FUNCTION = 40,
+    OP_CLOSURE = 41,
+    OP_CALL = 42,
+    OP_METHOD_CALL = 43,
+    OP_RETURN = 44,
+    OP_LOAD_BUILTIN = 45,
+
     // Arrays
-    OP_ARRAY,  // Same as BUILD_ARRAY
-    OP_BUILD_ARRAY,
-    OP_GET_SUBSCRIPT,
-    OP_SET_SUBSCRIPT,
-    
+    OP_ARRAY = 46,  // Same as BUILD_ARRAY
+    OP_BUILD_ARRAY = 47,
+    OP_GET_SUBSCRIPT = 48,
+    OP_SET_SUBSCRIPT = 49,
+
     // Objects
-    OP_CREATE_OBJECT,
-    OP_GET_PROPERTY,
-    OP_SET_PROPERTY,
-    OP_SET_PROTOTYPE,
-    
+    OP_CREATE_OBJECT = 50,
+    OP_GET_PROPERTY = 51,
+    OP_SET_PROPERTY = 52,
+    OP_SET_PROTOTYPE = 53,
+
     // Structs
-    OP_DEFINE_STRUCT,
-    OP_CREATE_STRUCT,
-    OP_GET_FIELD,
-    OP_SET_FIELD,
-    
+    OP_DEFINE_STRUCT = 54,
+    OP_CREATE_STRUCT = 55,
+    OP_GET_FIELD = 56,
+    OP_SET_FIELD = 57,
+
     // Prototypes
-    OP_GET_OBJECT_PROTO,
-    OP_GET_STRUCT_PROTO,
-    
+    OP_GET_OBJECT_PROTO = 58,
+    OP_GET_STRUCT_PROTO = 59,
+
     // Optionals
-    OP_OPTIONAL_CHAIN,
-    OP_FORCE_UNWRAP,
-    
+    OP_OPTIONAL_CHAIN = 60,
+    OP_FORCE_UNWRAP = 61,
+
     // Iterators
-    OP_GET_ITER,
-    OP_FOR_ITER,
-    
+    OP_GET_ITER = 62,
+    OP_FOR_ITER = 63,
+
     // Locals
-    OP_DEFINE_LOCAL,
-    
+    OP_DEFINE_LOCAL = 64,
+
     // Async
-    OP_AWAIT,
-    
+    OP_AWAIT = 65,
+
     // Modules
-    OP_LOAD_MODULE,
-    OP_LOAD_NATIVE_MODULE,
-    OP_IMPORT_FROM,
-    OP_IMPORT_ALL_FROM,
-    OP_MODULE_EXPORT,
-    
+    OP_LOAD_MODULE = 66,
+    OP_LOAD_NATIVE_MODULE = 67,
+    OP_IMPORT_FROM = 68,
+    OP_IMPORT_ALL_FROM = 69,
+    OP_MODULE_EXPORT = 70,
+
     // Long constants
-    OP_CONSTANT_LONG,
-    OP_CLOSURE_LONG,
-    
+    OP_CONSTANT_LONG = 71,
+    OP_CLOSURE_LONG = 72,
+
     // Type conversion
-    OP_TO_STRING,
-    
+    OP_TO_STRING = 73,
+
+    // String operations
+    OP_STRING_CONCAT = 74,
+    OP_STRING_INTERP = 75,
+    OP_INTERN_STRING = 76,
+
+    // Math extensions
+    OP_POWER = 77,
+
+    // Array operations
+    OP_LENGTH = 78,
+
+    // Object construction
+    OP_OBJECT_LITERAL = 79,
+
     // Misc
-    OP_PRINT,
-    OP_HALT
+    OP_HALT = 80
 } OpCode;
 
 // Forward declarations
@@ -208,7 +224,10 @@ typedef struct {
 // Forward declaration
 typedef struct ModuleLoader ModuleLoader;
 
-typedef struct {
+// Forward declare GC
+typedef struct GarbageCollector GarbageCollector;
+
+typedef struct VM {
     Chunk* chunk;
     uint8_t* ip;
     
@@ -244,6 +263,9 @@ typedef struct {
     
     // Debug trace flag
     bool debug_trace;
+    
+    // Garbage collector
+    GarbageCollector* gc;
 } VM;
 
 typedef enum {

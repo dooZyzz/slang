@@ -17,20 +17,41 @@ void stdlib_set_vm(VM* vm) {
 
 // Main stdlib initialization
 void stdlib_init(VM* vm) {
+    fprintf(stderr, "[DEBUG] stdlib_init called with vm=%p\n", (void*)vm);
     
-    // Initialize builtin prototypes first
-    init_builtin_prototypes();
+    // Store VM reference for later use
+    stdlib_set_vm(vm);
+    
+    // Don't call init_builtin_prototypes here - it's already called in vm_init
+    // init_builtin_prototypes();
     
     // Then add stdlib methods to each prototype
-    stdlib_init_object_prototype(get_object_prototype());
-    stdlib_init_array_prototype(get_array_prototype());
-    stdlib_init_string_prototype(get_string_prototype());
-    stdlib_init_function_prototype(get_function_prototype());
+    Object* obj_proto = get_object_prototype();
+    Object* arr_proto = get_array_prototype();
+    Object* str_proto = get_string_prototype();
+    Object* func_proto = get_function_prototype();
+    
+    if (!obj_proto || !arr_proto || !str_proto || !func_proto) {
+        fprintf(stderr, "[ERROR] Failed to get prototypes: obj=%p, arr=%p, str=%p, func=%p\n",
+                (void*)obj_proto, (void*)arr_proto, (void*)str_proto, (void*)func_proto);
+        return;
+    }
+    
+    fprintf(stderr, "[DEBUG] Initializing object prototype\n");
+    stdlib_init_object_prototype(obj_proto);
+    fprintf(stderr, "[DEBUG] Initializing array prototype\n");
+    stdlib_init_array_prototype(arr_proto);
+    fprintf(stderr, "[DEBUG] Initializing string prototype\n");
+    stdlib_init_string_prototype(str_proto);
+    fprintf(stderr, "[DEBUG] Initializing function prototype\n");
+    stdlib_init_function_prototype(func_proto);
+    fprintf(stderr, "[DEBUG] All prototypes initialized\n");
     
     // Register global functions
     
     // Register module introspection natives
-    register_module_natives(vm);
+    // Temporarily disabled to debug crash
+    // register_module_natives(vm);
     
     // Note: Global function registration would need to be done in vm_init
     // For now, these functions can be accessed through module imports
@@ -111,19 +132,34 @@ void stdlib_init_object_prototype(Object* proto) {
 
 // Array prototype methods
 void stdlib_init_array_prototype(Object* proto) {
+    fprintf(stderr, "[DEBUG] stdlib_init_array_prototype: proto=%p\n", (void*)proto);
+    if (!proto) {
+        fprintf(stderr, "[ERROR] Array prototype is NULL!\n");
+        return;
+    }
+    
     // Basic array methods
+    fprintf(stderr, "[DEBUG] Adding push method...\n");
     object_set_property(proto, "push", NATIVE_VAL(array_push_method));
+    fprintf(stderr, "[DEBUG] Adding pop method...\n");
     object_set_property(proto, "pop", NATIVE_VAL(array_pop_method));
+    fprintf(stderr, "[DEBUG] Adding length method...\n");
     object_set_property(proto, "length", NATIVE_VAL(array_length_method));
     
     // Higher-order methods
+    fprintf(stderr, "[DEBUG] Adding map method...\n");
     object_set_property(proto, "map", NATIVE_VAL(array_map_method));
+    fprintf(stderr, "[DEBUG] Adding filter method...\n");
     object_set_property(proto, "filter", NATIVE_VAL(array_filter_method));
+    fprintf(stderr, "[DEBUG] Adding reduce method...\n");
     object_set_property(proto, "reduce", NATIVE_VAL(array_reduce_method));
     
     // Additional array methods
+    fprintf(stderr, "[DEBUG] Adding count method...\n");
     object_set_property(proto, "count", NATIVE_VAL(array_length_method));  // count is an alias for length
+    fprintf(stderr, "[DEBUG] Adding isEmpty method...\n");
     object_set_property(proto, "isEmpty", NATIVE_VAL(array_isEmpty_method));
+    fprintf(stderr, "[DEBUG] stdlib_init_array_prototype completed\n");
 }
 
 // String prototype methods

@@ -148,14 +148,16 @@ func calculate(a, b, strategy) {
 
 let addStrategy = { a, b in a + b }
 let multiplyStrategy = { a, b in a * b }
-let powerStrategy = { a, b in 
+
+// Power strategy needs to be a function since it has multiple statements
+func powerStrategy(a, b) {
     let result = 1
     let i = 0
     while i < b {
         result = result * a
         i = i + 1
     }
-    result
+    return result
 }
 
 print("   10 + 5 = ${calculate(10, 5, addStrategy)}")

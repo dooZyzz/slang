@@ -647,6 +647,44 @@ static Expr* primary(Parser* parser)
     }
 
     parser_error_at_current(parser, "Expect expression.");
+    
+    // Error recovery: skip the current token to avoid infinite loop
+    if (!parser->panic_mode) {
+        parser->panic_mode = true;
+    }
+    
+    // Skip tokens until we find something that can start a new statement
+    while (parser->current.type != TOKEN_EOF) {
+        // Check if we hit a token that can end an expression/statement
+        if (parser->current.type == TOKEN_SEMICOLON ||
+            parser->current.type == TOKEN_RIGHT_BRACE ||
+            parser->current.type == TOKEN_RIGHT_PAREN ||
+            parser->current.type == TOKEN_RIGHT_BRACKET) {
+            break;
+        }
+        
+        // Check if we hit a token that can start a new statement
+        switch (parser->current.type) {
+            case TOKEN_CLASS:
+            case TOKEN_FUNC:
+            case TOKEN_VAR:
+            case TOKEN_LET:
+            case TOKEN_FOR:
+            case TOKEN_IF:
+            case TOKEN_WHILE:
+            case TOKEN_RETURN:
+            case TOKEN_BREAK:
+            case TOKEN_CONTINUE:
+                synchronize(parser);
+                break;
+            default:
+                advance(parser);
+        }
+        
+        // If we're synchronized, break out
+        if (!parser->panic_mode) break;
+    }
+    
     return NULL;
 }
 

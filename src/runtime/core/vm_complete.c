@@ -3,6 +3,7 @@
 #include "runtime/modules/loader/module_loader.h"
 #include "runtime/modules/lifecycle/builtin_modules.h"
 #include "runtime/core/bootstrap.h"
+#include "runtime/core/gc.h"
 #include "stdlib/stdlib.h"
 #include "utils/logger.h"
 #include "utils/allocators.h"
@@ -203,10 +204,6 @@ int chunk_add_constant(Chunk *chunk, TaggedValue value) {
     return chunk->constants.count++;
 }
 
-// Array methods are now implemented via prototypes in object.c
-
-// TODO: Implement array methods (map, filter, reduce) with object system
-// These will be added to Array.prototype when closure support is complete
 
 // Forward declaration
 void define_global(VM *vm, const char *name, TaggedValue value);
@@ -227,7 +224,31 @@ void vm_init(VM *vm) {
     vm->debug_trace = false;
     string_pool_init(&vm->strings);
     object_hash_init(&vm_objects(vm));
-    bootstrap_init(vm); // Initialize built-in prototypes
+    
+    // Initialize garbage collector
+    GCConfig gc_config = {
+        .heap_grow_factor = 2,
+        .min_heap_size = 1024 * 1024,  // 1MB
+        .max_heap_size = 0,             // Unlimited
+        .gc_threshold = 1024 * 1024,    // 1MB
+        .incremental = false,
+        .incremental_step_size = 1024,
+        .stress_test = false,
+        .verbose = false
+    };
+    vm->gc = gc_create(vm, &gc_config);
+    
+    // Set current VM for object allocation
+    object_set_current_vm(vm);
+    
+    // Initialize built-in prototypes early so extensions can use them
+    init_builtin_prototypes();
+    
+    bootstrap_init(vm); // Initialize built-in functions
+    
+    // Initialize built-in prototypes and stdlib after VM is fully set up
+    // Delay stdlib_init until after VM is fully created
+    // stdlib_init(vm);
 
     vm_has_error(vm) = false;
     vm_error_message(vm)[0] = '\0';
@@ -258,6 +279,12 @@ static void vm_print_internal(const char *message, const char *end, bool newline
 }
 
 void vm_free(VM *vm) {
+    // Destroy garbage collector (will collect all remaining objects)
+    if (vm->gc) {
+        gc_destroy(vm->gc);
+        vm->gc = NULL;
+    }
+    
     // Free global names and values
     for (size_t i = 0; i < vm->globals.count; i++) {
         if (vm->globals.names[i]) {
@@ -297,6 +324,11 @@ VM *vm_create() {
     vm_init(vm);
     // module_loader_init(vm); // TODO: Initialize module loader
     builtin_modules_init();
+    
+    // Initialize stdlib after VM is created
+    // Note: stdlib_init initializes prototypes and adds built-in methods
+    stdlib_init(vm);
+    
     return vm;
 }
 
@@ -463,6 +495,9 @@ static const char *value_to_string(VM *vm, TaggedValue value);
 // Forward declare call_native
 static InterpretResult call_native(VM *vm, NativeFn native, int arg_count);
 
+// Forward declare the unified interpreter
+static InterpretResult vm_run_frame(VM *vm);
+
 // Value equality comparison
 bool values_equal(TaggedValue a, TaggedValue b) {
     if (a.type != b.type) return false;
@@ -479,32 +514,9 @@ bool values_equal(TaggedValue a, TaggedValue b) {
     }
 }
 
-// Original vm_interpret for compatibility
-InterpretResult vm_interpret(VM *vm, Chunk *chunk) {
-    // Create a dummy function to wrap the chunk
-    Function main_func = {
-        .chunk = *chunk,
-        .name = "<script>",
-        .arity = 0,
-        .upvalue_count = 0,
-        .module = NULL
-    };
-    return vm_interpret_function(vm, &main_func);
-}
-
-InterpretResult vm_interpret_function(VM *vm, Function *function) {
-    Closure closure;
-    closure.function = function;
-    closure.upvalues = NULL;
-    closure.upvalue_count = 0;
-
-    vm_push(vm, (TaggedValue){VAL_CLOSURE, {.closure = &closure}});
-
-    CallFrame *frame = &vm->frames[vm->frame_count];
-    frame->closure = &closure;
-    frame->ip = function->chunk.code;
-    frame->slots = vm->stack;
-    vm->frame_count = 1;
+// Unified interpreter loop - runs the current frame until it returns or errors
+static InterpretResult vm_run_frame(VM *vm) {
+    CallFrame *frame = &vm->frames[vm->frame_count - 1];
 
     for (;;) {
         if (vm->debug_trace) {
@@ -559,49 +571,38 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
-            /* OP_STRING_CONCAT not yet implemented
-            case OP_STRING_CONCAT:
-            {
+            case OP_STRING_CONCAT: {
                 TaggedValue b = vm_pop(vm);
                 TaggedValue a = vm_pop(vm);
 
-                if (IS_STRING(a) && IS_STRING(b))
-                {
-                    const char* str_a = AS_STRING(a);
-                    const char* str_b = AS_STRING(b);
-                    size_t len_a = strlen(str_a);
-                    size_t len_b = strlen(str_b);
-                    size_t total_len = len_a + len_b + 1;
+                // Convert both values to strings using our existing value_to_string helper
+                const char* str_a = IS_STRING(a) ? AS_STRING(a) : value_to_string(vm, a);
+                const char* str_b = IS_STRING(b) ? AS_STRING(b) : value_to_string(vm, b);
+                
+                size_t len_a = strlen(str_a);
+                size_t len_b = strlen(str_b);
+                size_t total_len = len_a + len_b + 1;
 
-                    char* buffer = STR_ALLOC(total_len);
-                    strcpy(buffer, str_a);
-                    strcat(buffer, str_b);
+                char* buffer = STR_ALLOC(total_len);
+                strcpy(buffer, str_a);
+                strcat(buffer, str_b);
 
-                    // Intern the string
-                    const char* interned = string_pool_intern(&vm->strings, buffer, strlen(buffer));
-                    STR_FREE(buffer, total_len);
+                // Intern the string
+                const char* interned = string_pool_intern(&vm->strings, buffer, strlen(buffer));
+                STR_FREE(buffer, total_len);
 
-                    vm_push(vm, STRING_VAL(interned));
-                }
-                else
-                {
-                    vm_runtime_error(vm, "Operands must be strings.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
+                vm_push(vm, STRING_VAL(interned));
                 break;
-            } */
+            }
 
-            /* OP_STRING_INTERP not yet implemented
-            case OP_STRING_INTERP:
-            {
+            case OP_STRING_INTERP: {
                 uint8_t part_count = *frame->ip++;
                 size_t total_length = 0;
                 size_t* lengths = VM_ALLOC(sizeof(size_t) * part_count);
                 const char** parts = VM_ALLOC(sizeof(char*) * part_count);
 
-                // Calculate total length
-                for (int i = part_count - 1; i >= 0; i--)
-                {
+                // Calculate total length and convert all parts to strings
+                for (int i = part_count - 1; i >= 0; i--) {
                     TaggedValue val = vm_peek(vm, i);
                     const char* str = value_to_string(vm, val);
                     parts[part_count - 1 - i] = str;
@@ -614,45 +615,38 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 char* ptr = buffer;
 
                 // Concatenate all parts
-                for (int i = 0; i < part_count; i++)
-                {
+                for (int i = 0; i < part_count; i++) {
                     strcpy(ptr, parts[i]);
                     ptr += lengths[i];
                 }
 
                 // Pop all parts
-                for (int i = 0; i < part_count; i++)
-                {
+                for (int i = 0; i < part_count; i++) {
                     vm_pop(vm);
                 }
 
                 // Intern and push result
-                const char* interned = string_pool_intern(&vm->strings, buffer, total_length + 1);
+                const char* interned = string_pool_intern(&vm->strings, buffer, strlen(buffer));
                 STR_FREE(buffer, total_length + 1);
                 VM_FREE(lengths, sizeof(size_t) * part_count);
                 VM_FREE(parts, sizeof(char*) * part_count);
 
                 vm_push(vm, STRING_VAL(interned));
                 break;
-            } */
+            }
 
-            /* OP_INTERN_STRING not yet implemented
-            case OP_INTERN_STRING:
-            {
+            case OP_INTERN_STRING: {
                 TaggedValue string_val = vm_pop(vm);
-                if (IS_STRING(string_val))
-                {
+                if (IS_STRING(string_val)) {
                     const char* str = AS_STRING(string_val);
                     const char* interned = string_pool_intern(&vm->strings, str, strlen(str));
                     vm_push(vm, STRING_VAL(interned));
-                }
-                else
-                {
+                } else {
                     vm_runtime_error(vm, "Can only intern strings");
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 break;
-            } */
+            }
 
             case OP_CONSTANT_LONG: {
                 uint16_t index = (uint16_t) (*frame->ip++) << 8;
@@ -807,19 +801,16 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 return INTERPRET_RUNTIME_ERROR;
             }
 
-            /* OP_POWER not yet implemented
-            case OP_POWER:
-            {
+            case OP_POWER: {
                 TaggedValue b = vm_pop(vm);
                 TaggedValue a = vm_pop(vm);
-                if (IS_NUMBER(a) && IS_NUMBER(b))
-                {
+                if (IS_NUMBER(a) && IS_NUMBER(b)) {
                     vm_push(vm, NUMBER_VAL(pow(AS_NUMBER(a), AS_NUMBER(b))));
                     break;
                 }
                 vm_runtime_error(vm, "Operands must be numbers.");
                 return INTERPRET_RUNTIME_ERROR;
-            } */
+            }
 
             case OP_NEGATE: {
                 if (!IS_NUMBER(vm_peek(vm, 0))) {
@@ -913,41 +904,9 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
-            case OP_PRINT: {
-                TaggedValue value = vm_pop(vm);
-                const char *str = value_to_string(vm, value);
-                vm_print_internal(str, "", true);
-                break;
-            }
+            // OP_PRINT removed - handled by native print function
 
-            /* OP_PRINT_EXPR not yet implemented
-            case OP_PRINT_EXPR:
-            {
-                // Used for the CLI's expression printing
-                TaggedValue value = vm_peek(vm, 0);
-                const char* str = value_to_string(vm, value);
-                vm_print_internal(str, "", true);
-                break;
-            } */
-
-            /* OP_DEBUG not yet implemented
-            case OP_DEBUG:
-            {
-                uint8_t count = *frame->ip++;
-                printf("Debug: ");
-                for (int i = count - 1; i >= 0; i--)
-                {
-                    print_value(vm_peek(vm, i));
-                    if (i > 0) printf(", ");
-                }
-                printf("\n");
-                // Pop all values
-                for (int i = 0; i < count; i++)
-                {
-                    vm_pop(vm);
-                }
-                break;
-            } */
+            // OP_PRINT_EXPR and OP_DEBUG not needed - removed from design
 
             case OP_JUMP: {
                 uint16_t offset = (uint16_t) (*frame->ip++) << 8;
@@ -1124,10 +1083,7 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
             case OP_ARRAY:
             case OP_BUILD_ARRAY: {
                 uint8_t count = *frame->ip++;
-                Object *array = object_create();
-
-                // Set up as array object with length property
-                object_set_property(array, "length", NUMBER_VAL((double)count));
+                Object *array = array_create();  // Use array_create to get proper prototype
 
                 // Pop values in reverse order and set as indexed properties
                 for (int i = count - 1; i >= 0; i--) {
@@ -1136,6 +1092,9 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                     snprintf(index_str, sizeof(index_str), "%d", i);
                     object_set_property(array, index_str, value);
                 }
+                
+                // Update length after adding elements
+                object_set_property(array, "length", NUMBER_VAL((double)count));
 
                 vm_push(vm, OBJECT_VAL(array));
                 break;
@@ -1229,59 +1188,94 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
-            /* OP_LENGTH not yet implemented
-            case OP_LENGTH:
-            {
+            case OP_LENGTH: {
                 TaggedValue value = vm_pop(vm);
-                if (IS_ARRAY(value))
-                {
-                    // TODO: Get array count from object property
-                    vm_push(vm, NUMBER_VAL(0.0));
-                }
-                else if (IS_STRING(value))
-                {
+                if (IS_STRING(value)) {
                     vm_push(vm, NUMBER_VAL((double)strlen(AS_STRING(value))));
-                }
-                else if (IS_OBJECT(value))
-                {
-                    // Check for length property
+                } else if (IS_OBJECT(value)) {
+                    // Check for length property (arrays store their length as a property)
                     Object* obj = AS_OBJECT(value);
                     TaggedValue* len_ptr = object_get_property(obj, "length");
-                    if (len_ptr != NULL)
-                    {
+                    if (len_ptr != NULL) {
                         vm_push(vm, *len_ptr);
-                    }
-                    else
-                    {
+                    } else {
                         vm_runtime_error(vm, "Object has no length property.");
                         return INTERPRET_RUNTIME_ERROR;
                     }
-                }
-                else
-                {
+                } else {
                     vm_runtime_error(vm, "Cannot get length of non-collection type.");
                     return INTERPRET_RUNTIME_ERROR;
                 }
                 break;
-            } */
+            }
 
-            /* OP_ARRAY_PUSH not yet implemented
-            case OP_ARRAY_PUSH:
-            {
-                TaggedValue element = vm_pop(vm);
-                TaggedValue array_val = vm_pop(vm);
+            // OP_ARRAY_PUSH removed - handled as a method on array prototype
 
-                if (!IS_ARRAY(array_val))
-                {
-                    vm_runtime_error(vm, "Can only push to arrays.");
+            case OP_METHOD_CALL: {
+                uint8_t arg_count = *frame->ip++;
+                uint8_t method_name_index = *frame->ip++;
+                const char* method_name = AS_STRING(frame->closure->function->chunk.constants.values[method_name_index]);
+                
+                // Get the receiver object (it's at position arg_count from top)
+                TaggedValue receiver = vm_peek(vm, arg_count);
+                
+                // Look up the method on the object or its prototype chain
+                TaggedValue method = NIL_VAL;
+                
+                if (IS_OBJECT(receiver)) {
+                    Object* obj = AS_OBJECT(receiver);
+                    TaggedValue* method_ptr = object_get_property(obj, method_name);
+                    if (method_ptr) {
+                        method = *method_ptr;
+                    }
+                } else if (IS_STRING(receiver)) {
+                    // String methods from string prototype
+                    Object* string_proto = get_string_prototype();
+                    if (string_proto) {
+                        TaggedValue* method_ptr = object_get_property(string_proto, method_name);
+                        if (method_ptr) {
+                            method = *method_ptr;
+                        }
+                    }
+                } else if (IS_NUMBER(receiver)) {
+                    // Number methods from number prototype
+                    Object* number_proto = get_number_prototype();
+                    if (number_proto) {
+                        TaggedValue* method_ptr = object_get_property(number_proto, method_name);
+                        if (method_ptr) {
+                            method = *method_ptr;
+                        }
+                    }
+                }
+                
+                if (IS_NIL(method)) {
+                    vm_runtime_error(vm, "Undefined method '%s'.", method_name);
                     return INTERPRET_RUNTIME_ERROR;
                 }
-
-                Array* array = AS_ARRAY(array_val);
-                array_push(array, element);
-                vm_push(vm, NIL_VAL);  // Push returns nothing
+                
+                // Replace receiver with method on stack
+                vm->stack_top[-arg_count - 1] = method;
+                
+                // Call the method
+                if (IS_CLOSURE(method)) {
+                    Closure *closure = AS_CLOSURE(method);
+                    InterpretResult result = call_closure(vm, closure, arg_count);
+                    if (result != INTERPRET_OK) {
+                        return result;
+                    }
+                    frame = &vm->frames[vm->frame_count - 1];
+                } else if (IS_NATIVE(method)) {
+                    NativeFn native = AS_NATIVE(method);
+                    InterpretResult result = call_native(vm, native, arg_count);
+                    if (result != INTERPRET_OK) {
+                        return result;
+                    }
+                } else {
+                    vm_runtime_error(vm, "Invalid method type.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
                 break;
-            } */
+            }
 
             case OP_CALL: {
                 uint8_t arg_count = *frame->ip++;
@@ -1440,146 +1434,14 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
-            /* OP_STRUCT not yet implemented
-            case OP_STRUCT:
-            {
-                uint8_t field_count = *frame->ip++;
+            // OP_STRUCT and OP_CONSTRUCT removed - use OP_DEFINE_STRUCT and OP_CREATE_STRUCT instead
 
-                // Allocate arrays for field names
-                char** field_names = VM_ALLOC(sizeof(char*) * field_count);
-                bool allocation_failed = false;
-
-                // Pop field names from stack (they were pushed in reverse order)
-                for (int i = field_count - 1; i >= 0; i--)
-                {
-                    TaggedValue field_val = vm_pop(vm);
-                    if (!IS_STRING(field_val))
-                    {
-                        for (int j = i + 1; j < field_count; j++) {
-                            STR_FREE(field_names[j], strlen(field_names[j]) + 1);
-                        }
-                        VM_FREE(field_names, sizeof(char*) * field_count);
-                        vm_runtime_error(vm, "Struct field name must be a string.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    const char* field_str = AS_STRING(field_val);
-                    if (strchr(field_str, ' ') != NULL)
-                    {
-                        for (int j = i + 1; j < field_count; j++) {
-                            STR_FREE(field_names[j], strlen(field_names[j]) + 1);
-                        }
-                        VM_FREE(field_names, sizeof(char*) * field_count);
-                        vm_runtime_error(vm, "Struct field name cannot contain spaces: '%s'.", field_str);
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    field_names[i] = STR_DUP(field_str);
-                }
-
-                // Get struct name
-                TaggedValue name_val = vm_pop(vm);
-                if (!IS_STRING(name_val))
-                {
-                    for (int i = 0; i < field_count; i++) {
-                        STR_FREE(field_names[i], strlen(field_names[i]) + 1);
-                    }
-                    VM_FREE(field_names, sizeof(char*) * field_count);
-                    vm_runtime_error(vm, "Struct name must be a string.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                const char* struct_name = AS_STRING(name_val);
-
-                // Create the struct type
-                // StructType* type = create_struct_type(struct_name, field_names, field_count); // TODO: Implement
-                StructType* type = NULL; // Placeholder
-
-                // Store in VM's struct types
-                if (vm->struct_types.count + 1 > vm->struct_types.capacity)
-                {
-                    size_t old_capacity = vm->struct_types.capacity;
-                    size_t new_capacity = old_capacity < 8 ? 8 : old_capacity * 2;
-
-                    // Realloc pattern for names
-                    char** new_names = VM_NEW_ARRAY(char*, new_capacity);
-                    if (vm->struct_types.names) {
-                        memcpy(new_names, vm->struct_types.names, old_capacity * sizeof(char*));
-                        VM_FREE(vm->struct_types.names, old_capacity * sizeof(char*));
-                    }
-                    vm->struct_types.names = new_names;
-
-                    // Realloc pattern for types
-                    StructType** new_types = VM_NEW_ARRAY(StructType*, new_capacity);
-                    if (vm->struct_types.types) {
-                        memcpy(new_types, vm->struct_types.types, old_capacity * sizeof(StructType*));
-                        VM_FREE(vm->struct_types.types, old_capacity * sizeof(StructType*));
-                    }
-                    vm->struct_types.types = new_types;
-
-                    vm->struct_types.capacity = new_capacity;
-                }
-                vm->struct_types.names[vm->struct_types.count] = STR_DUP(struct_name);
-                vm->struct_types.types[vm->struct_types.count] = type;
-                vm->struct_types.count++;
-
-                // Push the struct type as a value
-                vm_push(vm, STRUCT_TYPE_VAL(type));
-
-                // Clean up field names array (strings are owned by struct type now)
-                VM_FREE(field_names, sizeof(char*) * field_count);
-                break;
-            } */
-
-            /* OP_CONSTRUCT not yet implemented
-            case OP_CONSTRUCT:
-            {
-                uint8_t field_count = *frame->ip++;
-                TaggedValue type_val = vm_peek(vm, field_count);
-
-                if (!IS_STRUCT_TYPE(type_val))
-                {
-                    vm_runtime_error(vm, "Can only construct from struct types.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-
-                StructType* type = AS_STRUCT_TYPE(type_val);
-                if (field_count != type->field_count)
-                {
-                    vm_runtime_error(vm, "Expected %d arguments for struct %s, got %d.",
-                                     type->field_count, type->name, field_count);
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-
-                // Create new object and set prototype
+            case OP_CREATE_OBJECT: {
+                // Create an empty object
                 Object* obj = object_create();
-
-                // Pop field values and set properties
-                for (int i = field_count - 1; i >= 0; i--)
-                {
-                    TaggedValue value = vm_pop(vm);
-                    object_set_property(obj, type->field_names[i], value);
-                }
-
-                // Pop the struct type
-                vm_pop(vm);
-
-                // Get the struct name for the type property
-                const char* type_name = NULL;
-                for (size_t i = 0; i < vm->struct_types.count; i++)
-                {
-                    if (vm->struct_types.types[i] == type)
-                    {
-                        type_name = vm->struct_types.names[i];
-                        break;
-                    }
-                }
-
-                if (type_name)
-                {
-                    object_set_property(obj, "__struct_type__", STRING_VAL(STR_DUP(type_name)));
-                }
-
                 vm_push(vm, OBJECT_VAL(obj));
                 break;
-            } */
+            }
 
             case OP_GET_PROPERTY: {
                 TaggedValue name_val = vm_pop(vm);
@@ -1628,6 +1490,19 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                     } else {
                         vm_push(vm, NIL_VAL);
                     }
+                } else if (IS_NUMBER(object_val)) {
+                    // Handle number properties by looking them up on Number.prototype
+                    Object* number_proto = get_number_prototype();
+                    if (number_proto) {
+                        TaggedValue* method = object_get_property(number_proto, property_name);
+                        if (method) {
+                            vm_push(vm, *method);
+                        } else {
+                            vm_push(vm, NIL_VAL);
+                        }
+                    } else {
+                        vm_push(vm, NIL_VAL);
+                    }
                 } else {
                     vm_runtime_error(vm, "Only objects have properties.");
                     return INTERPRET_RUNTIME_ERROR;
@@ -1657,20 +1532,16 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
-            /* OP_OBJECT_LITERAL not yet implemented
-            case OP_OBJECT_LITERAL:
-            {
+            case OP_OBJECT_LITERAL: {
                 uint8_t property_count = *frame->ip++;
                 Object* obj = object_create();
 
                 // Properties are on the stack as: value, key, value, key, ...
-                for (int i = 0; i < property_count; i++)
-                {
+                for (int i = 0; i < property_count; i++) {
                     TaggedValue value = vm_pop(vm);
                     TaggedValue key = vm_pop(vm);
 
-                    if (!IS_STRING(key))
-                    {
+                    if (!IS_STRING(key)) {
                         vm_runtime_error(vm, "Object property key must be a string.");
                         return INTERPRET_RUNTIME_ERROR;
                     }
@@ -1680,39 +1551,9 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
 
                 vm_push(vm, OBJECT_VAL(obj));
                 break;
-            } */
+            }
 
-            /* OP_IMPORT not yet implemented
-            case OP_IMPORT:
-            {
-                uint8_t path_index = *frame->ip++;
-                const char* module_path = AS_STRING(frame->closure->function->chunk.constants.values[path_index]);
-
-                // TaggedValue module_val = load_module(vm, module_path); // TODO: implement
-                TaggedValue module_val = NIL_VAL;
-                if (IS_NIL(module_val))
-                {
-                    vm_runtime_error(vm, "Failed to load module: %s", module_path);
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-
-                vm_push(vm, module_val);
-                break;
-            } */
-
-            /* OP_EXPORT not yet implemented
-            case OP_EXPORT:
-            {
-                TaggedValue value = vm_pop(vm);
-                uint8_t name_index = *frame->ip++;
-                const char* export_name = AS_STRING(frame->closure->function->chunk.constants.values[name_index]);
-
-                if (vm->current_module)
-                {
-                    module_add_export(vm->current_module, export_name, value);
-                }
-                break;
-            } */
+            // OP_IMPORT and OP_EXPORT removed - use OP_LOAD_MODULE, OP_IMPORT_FROM, OP_MODULE_EXPORT instead
 
             case OP_LOAD_MODULE: {
                 uint8_t path_index = *frame->ip++;
@@ -1787,11 +1628,98 @@ InterpretResult vm_interpret_function(VM *vm, Function *function) {
                 break;
             }
 
+            case OP_GET_OBJECT_PROTO: {
+                // Get the prototype for a built-in type to register extension methods
+                // Stack: [] -> [prototype]
+                uint8_t type_id = *frame->ip++;
+                Object* prototype = NULL;
+                
+                switch (type_id) {
+                    case 0: // Object
+                        prototype = get_object_prototype();
+                        break;
+                    case 1: // Array
+                        prototype = get_array_prototype();
+                        break;
+                    case 2: // String
+                        prototype = get_string_prototype();
+                        break;
+                    case 3: // Number
+                        prototype = get_number_prototype();
+                        break;
+                    case 4: // Function
+                        prototype = get_function_prototype();
+                        break;
+                    default:
+                        vm_runtime_error(vm, "Unknown built-in type ID: %d", type_id);
+                        return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                if (!prototype) {
+                    // Debug: check if prototypes are initialized
+                    fprintf(stderr, "[DEBUG] Prototype is NULL for type_id=%d\n", type_id);
+                    fprintf(stderr, "[DEBUG] object_prototype=%p, array_prototype=%p, string_prototype=%p, number_prototype=%p\n",
+                            get_object_prototype(), get_array_prototype(), get_string_prototype(), get_number_prototype());
+                    vm_runtime_error(vm, "Failed to get prototype for type ID: %d", type_id);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                vm_push(vm, OBJECT_VAL(prototype));
+                break;
+            }
+            
+            case OP_GET_STRUCT_PROTO: {
+                // Get the prototype for a struct type to register extension methods
+                // Stack: [] -> [prototype]
+                uint8_t name_index = *frame->ip++;
+                const char* struct_name = AS_STRING(frame->closure->function->chunk.constants.values[name_index]);
+                
+                // Get or create the struct prototype
+                Object* prototype = get_struct_prototype(struct_name);
+                if (!prototype) {
+                    vm_runtime_error(vm, "Failed to get prototype for struct: %s", struct_name);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                
+                vm_push(vm, OBJECT_VAL(prototype));
+                break;
+            }
+
             default:
                 vm_runtime_error(vm, "Unknown opcode %d.", instruction);
                 return INTERPRET_RUNTIME_ERROR;
         }
     }
+}
+
+// Original vm_interpret for compatibility
+InterpretResult vm_interpret(VM *vm, Chunk *chunk) {
+    // Create a dummy function to wrap the chunk
+    Function main_func = {
+        .chunk = *chunk,
+        .name = "<script>",
+        .arity = 0,
+        .upvalue_count = 0,
+        .module = NULL
+    };
+    return vm_interpret_function(vm, &main_func);
+}
+
+InterpretResult vm_interpret_function(VM *vm, Function *function) {
+    Closure closure;
+    closure.function = function;
+    closure.upvalues = NULL;
+    closure.upvalue_count = 0;
+
+    vm_push(vm, (TaggedValue){VAL_CLOSURE, {.closure = &closure}});
+
+    CallFrame *frame = &vm->frames[vm->frame_count];
+    frame->closure = &closure;
+    frame->ip = function->chunk.code;
+    frame->slots = vm->stack;
+    vm->frame_count = 1;
+
+    return vm_run_frame(vm);
 }
 
 Function *function_new(const char *name) {
@@ -1931,16 +1859,17 @@ TaggedValue vm_call_value(VM *vm, TaggedValue callee, int arg_count, TaggedValue
 
 // Helper to call a function
 TaggedValue vm_call_function(VM *vm, Function *function, int arg_count, TaggedValue *args) {
-    // Push arguments onto stack
-    for (int i = 0; i < arg_count; i++) {
-        vm_push(vm, args[i]);
-    }
-
-    // Create closure from function
+    // Push the function as a closure onto the stack
     Closure closure;
     closure.function = function;
     closure.upvalue_count = 0;
     closure.upvalues = NULL;
+    vm_push(vm, (TaggedValue){VAL_CLOSURE, {.closure = &closure}});
+
+    // Push arguments onto stack
+    for (int i = 0; i < arg_count; i++) {
+        vm_push(vm, args[i]);
+    }
 
     // Call the closure
     if (call_closure(vm, &closure, arg_count) != INTERPRET_OK) {
@@ -1949,33 +1878,21 @@ TaggedValue vm_call_function(VM *vm, Function *function, int arg_count, TaggedVa
 
     // Run the interpreter until this function returns
     int initial_frame_count = vm->frame_count - 1;
-    while (vm->frame_count > initial_frame_count) {
-        // Simple execution loop - this is a simplified version
-        CallFrame *frame = &vm->frames[vm->frame_count - 1];
-        uint8_t instruction = *frame->ip++;
-
-        // Handle RETURN specially
-        if (instruction == OP_RETURN) {
-            TaggedValue result = vm_pop(vm);
-            close_upvalues(vm, frame->slots);
-            vm->frame_count--;
-            if (vm->frame_count == initial_frame_count) {
-                return result;
-            }
-            vm->stack_top = frame->slots;
-            vm_push(vm, result);
-        } else {
-            // For now, just return NIL for other instructions
-            // A full implementation would handle all opcodes
-            break;
-        }
+    InterpretResult result = vm_run_frame(vm);
+    
+    // The result should be on top of the stack
+    if (result == INTERPRET_OK && vm->frame_count == initial_frame_count) {
+        return vm_pop(vm);
     }
-
+    
     return NIL_VAL;
 }
 
 // Helper to call a closure
 TaggedValue vm_call_closure(VM *vm, Closure *closure, int arg_count, TaggedValue *args) {
+    // Push the closure onto the stack
+    vm_push(vm, (TaggedValue){VAL_CLOSURE, {.closure = closure}});
+
     // Push arguments onto stack
     for (int i = 0; i < arg_count; i++) {
         vm_push(vm, args[i]);
@@ -1988,28 +1905,13 @@ TaggedValue vm_call_closure(VM *vm, Closure *closure, int arg_count, TaggedValue
 
     // Run the interpreter until this function returns
     int initial_frame_count = vm->frame_count - 1;
-    while (vm->frame_count > initial_frame_count) {
-        // Simple execution loop - this is a simplified version
-        CallFrame *frame = &vm->frames[vm->frame_count - 1];
-        uint8_t instruction = *frame->ip++;
-
-        // Handle RETURN specially
-        if (instruction == OP_RETURN) {
-            TaggedValue result = vm_pop(vm);
-            close_upvalues(vm, frame->slots);
-            vm->frame_count--;
-            if (vm->frame_count == initial_frame_count) {
-                return result;
-            }
-            vm->stack_top = frame->slots;
-            vm_push(vm, result);
-        } else {
-            // For now, just return NIL for other instructions
-            // A full implementation would handle all opcodes
-            break;
-        }
+    InterpretResult result = vm_run_frame(vm);
+    
+    // The result should be on top of the stack
+    if (result == INTERPRET_OK && vm->frame_count == initial_frame_count) {
+        return vm_pop(vm);
     }
-
+    
     return NIL_VAL;
 }
 

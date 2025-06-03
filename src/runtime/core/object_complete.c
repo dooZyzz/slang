@@ -1,10 +1,22 @@
 #include "runtime/core/object.h"
 #include "runtime/core/object_sizes.h"
 #include "runtime/core/vm.h"
+#include "runtime/core/gc.h"
 #include "utils/allocators.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+// Thread-local storage for current VM (needed for GC allocation)
+#ifdef _MSC_VER
+    static __declspec(thread) VM* current_vm = NULL;
+#else
+    static __thread VM* current_vm = NULL;
+#endif
+
+void object_set_current_vm(VM* vm) {
+    current_vm = vm;
+}
 
 // Global prototype objects
 static Object* object_prototype = NULL;
@@ -25,21 +37,43 @@ static StructPrototype* struct_prototypes = NULL;
 // Helper to create a property node
 static ObjectProperty* property_create(const char* key, TaggedValue value)
 {
-    ObjectProperty* prop = OBJ_NEW(ObjectProperty, "property");
+    ObjectProperty* prop;
+    
+    // Use GC if available
+    if (current_vm && current_vm->gc) {
+        prop = GC_ALLOC(current_vm->gc, ObjectProperty, "property");
+    } else {
+        prop = OBJ_NEW(ObjectProperty, "property");
+    }
     if (!prop) return NULL;
     
     size_t key_size = strlen(key) + 1;
-    prop->key = STR_ALLOC(key_size);
+    
+    // Allocate key string
+    if (current_vm && current_vm->gc) {
+        prop->key = GC_ALLOC_ARRAY(current_vm->gc, char, key_size, "prop-key");
+    } else {
+        prop->key = STR_ALLOC(key_size);
+    }
     if (!prop->key) {
-        OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
+        if (!(current_vm && current_vm->gc)) {
+            OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
+        }
         return NULL;
     }
     strcpy(prop->key, key);
     
-    prop->value = OBJ_NEW(TaggedValue, "prop-value");
+    // Allocate value holder
+    if (current_vm && current_vm->gc) {
+        prop->value = GC_ALLOC(current_vm->gc, TaggedValue, "prop-value");
+    } else {
+        prop->value = OBJ_NEW(TaggedValue, "prop-value");
+    }
     if (!prop->value) {
-        STR_FREE(prop->key, key_size);
-        OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
+        if (!(current_vm && current_vm->gc)) {
+            STR_FREE(prop->key, key_size);
+            OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
+        }
         return NULL;
     }
     *prop->value = value;
@@ -53,20 +87,33 @@ static void property_destroy(ObjectProperty* prop)
 {
     if (prop)
     {
-        if (prop->key) {
-            STR_FREE(prop->key, strlen(prop->key) + 1);
+        // If GC is active, it will handle memory cleanup
+        if (!(current_vm && current_vm->gc)) {
+            // Manual cleanup only when GC is not active
+            if (prop->key) {
+                STR_FREE(prop->key, strlen(prop->key) + 1);
+            }
+            if (prop->value) {
+                OBJ_FREE(prop->value, sizeof(TaggedValue));
+            }
+            OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
         }
-        if (prop->value) {
-            OBJ_FREE(prop->value, sizeof(TaggedValue));
-        }
-        OBJ_FREE(prop, SIZE_OBJECT_PROPERTY);
+        // With GC, we don't free - GC will handle it
     }
 }
 
 // Create a new object
 Object* object_create(void)
 {
-    Object* obj = OBJ_NEW(Object, "object");
+    Object* obj;
+    
+    // Use GC if available, otherwise fall back to direct allocation
+    if (current_vm && current_vm->gc) {
+        obj = GC_ALLOC(current_vm->gc, Object, "object");
+    } else {
+        obj = OBJ_NEW(Object, "object");
+    }
+    
     if (!obj) return NULL;
     
     obj->properties = NULL;
@@ -91,15 +138,30 @@ void object_destroy(Object* obj)
 {
     if (!obj) return;
     
-    ObjectProperty* prop = obj->properties;
-    while (prop)
-    {
-        ObjectProperty* next = prop->next;
-        property_destroy(prop);
-        prop = next;
+    // If GC is active, it will handle the memory - we just need to clean up resources
+    if (current_vm && current_vm->gc) {
+        // GC will free the memory, but we still need to clean up property chains
+        // to prevent leaks in the property linked list
+        ObjectProperty* prop = obj->properties;
+        while (prop)
+        {
+            ObjectProperty* next = prop->next;
+            // Only free the property structure, not the object itself
+            property_destroy(prop);
+            prop = next;
+        }
+        // Don't free the object - GC will handle it
+    } else {
+        // No GC, manual cleanup
+        ObjectProperty* prop = obj->properties;
+        while (prop)
+        {
+            ObjectProperty* next = prop->next;
+            property_destroy(prop);
+            prop = next;
+        }
+        OBJ_FREE(obj, SIZE_OBJECT);
     }
-    
-    OBJ_FREE(obj, SIZE_OBJECT);
 }
 
 // Get property, checking prototype chain
@@ -133,7 +195,20 @@ TaggedValue* object_get_property(Object* obj, const char* key)
 // Set property (always on the object itself, not prototype)
 void object_set_property(Object* obj, const char* key, TaggedValue value)
 {
-    if (!obj) return;
+    if (!obj) {
+        fprintf(stderr, "[ERROR] object_set_property: obj is NULL!\n");
+        return;
+    }
+    if (!key) {
+        fprintf(stderr, "[ERROR] object_set_property: key is NULL!\n");
+        return;
+    }
+    
+    // Debug for stdlib init
+    if (strstr(key, "push") || strstr(key, "map")) {
+        fprintf(stderr, "[DEBUG] object_set_property: obj=%p, key='%s', value.type=%d\n", 
+                (void*)obj, key, value.type);
+    }
     
     // Check if property already exists
     ObjectProperty* prop = obj->properties;
@@ -149,7 +224,10 @@ void object_set_property(Object* obj, const char* key, TaggedValue value)
     
     // Add new property
     ObjectProperty* new_prop = property_create(key, value);
-    if (!new_prop) return;
+    if (!new_prop) {
+        fprintf(stderr, "[ERROR] object_set_property: Failed to create property for key='%s'\n", key);
+        return;
+    }
     
     new_prop->next = obj->properties;
     obj->properties = new_prop;
@@ -320,8 +398,17 @@ size_t array_length(Object* array)
 // Initialize built-in prototypes
 void init_builtin_prototypes(void)
 {
+    // Skip if already initialized
+    if (object_prototype) {
+        return;
+    }
+    
     // Create Object.prototype
-    object_prototype = OBJ_NEW(Object, "object-prototype");
+    if (current_vm && current_vm->gc) {
+        object_prototype = GC_ALLOC(current_vm->gc, Object, "object-prototype");
+    } else {
+        object_prototype = OBJ_NEW(Object, "object-prototype");
+    }
     if (!object_prototype) return;
     
     object_prototype->properties = NULL;

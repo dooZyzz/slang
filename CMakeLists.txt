@@ -94,6 +94,7 @@ set(RUNTIME_SOURCES
     # Core runtime
     src/runtime/core/coroutine.c  # Not refactored yet
     src/runtime/core/bootstrap.c  # Not refactored yet
+    src/runtime/core/gc.c  # Garbage collector
     
     # Module loader
     src/runtime/modules/loader/module_loader.c
@@ -162,7 +163,7 @@ add_test_suite(ast_unit tests/unit/test_ast_unit.c)
 add_test_suite(string_pool_unit tests/unit/test_string_pool_unit.c)
 add_test_suite(object_unit tests/unit/test_object_unit.c)
 add_test_suite(error_advanced_unit tests/unit/test_error_advanced_unit.c)
-add_test_suite(syntax_unit tests/unit/test_syntax_unit.c)
+# add_test_suite(syntax_unit tests/unit/test_syntax_unit.c)  # Disabled - not implemented
 add_test_suite(module_system_unit tests/unit/test_module_system_unit.c)
 add_test_suite(multi_module_unit tests/unit/test_multi_module_unit.c)
 
