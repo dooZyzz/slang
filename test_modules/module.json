@@ -1,0 +1,7 @@
+{
+    "name": "test_modules",
+    "version": "1.0.0",
+    "type": "module",
+    "entry": "main.swift",
+    "sources": ["main.swift", "math_utils.swift"]
+}

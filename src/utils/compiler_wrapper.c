@@ -2,9 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <time.h>
 #include "utils/compiler_wrapper.h"
+#include "utils/platform_compat.h"
 
 #ifdef _WIN32
     #include <windows.h>

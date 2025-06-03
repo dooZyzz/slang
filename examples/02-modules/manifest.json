@@ -1,0 +1,11 @@
+{
+  "name": "modules-example",
+  "version": "1.0.0",
+  "description": "SwiftLang module system demonstration",
+  "main": "main.swift",
+  "type": "application",
+  "sources": [
+    "math_utils.swift",
+    "string_utils.swift"
+  ]
+}

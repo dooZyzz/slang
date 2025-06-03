@@ -113,7 +113,7 @@ void semantic_analyzer_destroy(SemanticAnalyzer* analyzer) {
     type_context_destroy(analyzer->context.types);
     visitor_destroy(analyzer->visitor);
 
-    MEM_FREE(alloc, analyzer, sizeof(SemanticAnalyzer));
+    SLANG_MEM_FREE(alloc, analyzer, sizeof(SemanticAnalyzer));
 }
 
 void semantic_analyzer_analyze(SemanticAnalyzer* analyzer, ProgramNode* program) {
@@ -145,7 +145,7 @@ void semantic_analyzer_check_unused_variables(SemanticAnalyzer* analyzer) {
 
 // Type checking helpers
 
-static Type* check_binary_op_types(Type* left, Type* right, TokenType op) {
+static Type* check_binary_op_types(Type* left, Type* right, SlangTokenType op) {
     if (!left || !right) return NULL;
 
     // Arithmetic operators
@@ -185,7 +185,7 @@ static Type* check_binary_op_types(Type* left, Type* right, TokenType op) {
     return NULL;
 }
 
-static Type* check_unary_op_type(Type* operand, TokenType op) {
+static Type* check_unary_op_type(Type* operand, SlangTokenType op) {
     if (!operand) return NULL;
 
     switch (op) {
@@ -287,7 +287,7 @@ static void* visit_variable_expr(ASTVisitor* visitor, Expr* expr) {
             snprintf(msg, msg_len, "Undefined variable: %s", expr->variable.name);
             error_report_simple(ctx->errors, ERROR_LEVEL_ERROR, ERROR_PHASE_SEMANTIC,
                 NULL, 0, 0, "%s", msg);
-            MEM_FREE(alloc, msg, msg_len);
+            SLANG_MEM_FREE(alloc, msg, msg_len);
         }
         expr->computed_type = type_any();
     } else {

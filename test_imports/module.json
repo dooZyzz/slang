@@ -1,0 +1,12 @@
+{
+    "name": "test_imports",
+    "version": "1.0.0",
+    "type": "application",
+    "entry": "main.swift",
+    "sources": [
+        "main.swift",
+        "utils.swift", 
+        "math_utils.swift"
+    ],
+    "dependencies": {}
+}

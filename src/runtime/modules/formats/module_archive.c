@@ -1,11 +1,14 @@
 #include "runtime/modules/formats/module_archive.h"
 #include "utils/allocators.h"
 #include "runtime/modules/module_allocator_macros.h"
+#include "utils/platform_compat.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 // Include miniz for ZIP support
 #include "miniz.h"

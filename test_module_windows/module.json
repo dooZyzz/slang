@@ -1,0 +1,7 @@
+{
+  "name": "windows-test-module",
+  "version": "1.0.0",
+  "description": "Windows test module for bundle system",
+  "main": "main.swift",
+  "type": "module"
+}

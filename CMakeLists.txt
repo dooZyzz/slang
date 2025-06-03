@@ -1,9 +1,22 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.5)
 project(SwiftLikeLang C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic -Wno-newline-eof")
+
+# Platform-specific compiler flags
+if(MSVC)
+    # MSVC flags
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W3 /wd4996 /wd4244 /wd4267")
+    add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # GCC/Clang flags
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Wpedantic")
+    if(APPLE)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-newline-eof")
+    endif()
+endif()
+
 include_directories(include)
 
 # Add module path for custom Find modules
@@ -55,7 +68,6 @@ set(DEBUG_SOURCES
 set(UTILS_SOURCES
     src/utils/error.c
     src/utils/test_framework.c  # Not refactored yet
-    src/utils/syntax_test.c  # Not refactored yet
     src/utils/cli.c  # Not refactored yet
     src/utils/logger.c  # Not refactored yet
     src/utils/compiler_wrapper.c  # Not refactored yet
@@ -68,7 +80,6 @@ set(UTILS_SOURCES
     src/utils/memory_freelist.c
     src/utils/memory_trace.c
     src/utils/alloc.c
-    # src/utils/hash_map_v2.c  # Removed - using hash_map_refactored.c instead
     src/utils/allocators.c
 )
 
@@ -92,7 +103,7 @@ set(RUNTIME_SOURCES
     # Module formats
     src/runtime/modules/formats/module_format.c
     src/runtime/modules/formats/module_archive.c
-    src/runtime/modules/formats/module_bundle.c
+    src/runtime/modules/module_bundle.c
     
     # Module extensions
     src/runtime/modules/extensions/module_hooks.c
@@ -115,8 +126,15 @@ set(STDLIB_SOURCES
 # Create static library
 add_library(lang_lib STATIC ${LEXER_SOURCES} ${AST_SOURCES} ${PARSER_SOURCES} ${VM_SOURCES} ${CODEGEN_SOURCES} ${DEBUG_SOURCES} ${UTILS_SOURCES} ${SEMANTIC_SOURCES} ${RUNTIME_SOURCES} ${STDLIB_SOURCES})
 
+# Add miniz include directories to the target
+target_include_directories(lang_lib PRIVATE ${MINIZ_INCLUDE_DIRS})
+
 # Link with system libraries
-target_link_libraries(lang_lib ${CMAKE_DL_LIBS} ${MINIZ_LIBRARIES})
+if(WIN32)
+    target_link_libraries(lang_lib ${MINIZ_LIBRARIES})
+else()
+    target_link_libraries(lang_lib ${CMAKE_DL_LIBS} ${MINIZ_LIBRARIES})
+endif()
 
 # Include test framework
 include(cmake/TestFramework.cmake)
@@ -128,33 +146,42 @@ enable_testing()
 
 # New framework-based test suites
 # Build as both libraries and standalone executables
-add_dual_test_suite(lexer_unit tests/unit/test_lexer_unit.c)
-add_dual_test_suite(vm_unit tests/unit/test_vm_unit.c)
-add_dual_test_suite(symbol_table_unit tests/unit/test_symbol_table_unit.c)
-add_dual_test_suite(error_reporter_unit tests/unit/test_error_reporter_unit.c)
-add_dual_test_suite(integration tests/integration/test_integration.c)
-add_dual_test_suite(array_methods_unit tests/unit/test_array_methods_unit.c)
-add_dual_test_suite(array_hof_unit tests/unit/test_array_hof_unit.c)
-add_dual_test_suite(string_interp_unit tests/unit/test_string_interp_unit.c)
-add_dual_test_suite(for_loop_unit tests/unit/test_for_loop_unit.c)
-add_dual_test_suite(modulo_unit tests/unit/test_modulo_unit.c)
-add_dual_test_suite(array_assign_unit tests/unit/test_array_assign_unit.c)
-add_dual_test_suite(ast_unit tests/unit/test_ast_unit.c)
-add_dual_test_suite(string_pool_unit tests/unit/test_string_pool_unit.c)
-add_dual_test_suite(object_unit tests/unit/test_object_unit.c)
-add_dual_test_suite(error_advanced_unit tests/unit/test_error_advanced_unit.c)
-add_dual_test_suite(syntax_unit tests/unit/test_syntax_unit.c)
-add_dual_test_suite(module_system_unit tests/unit/test_module_system_unit.c)
-add_dual_test_suite(multi_module_unit tests/unit/test_multi_module_unit.c)
+#add_dual_test_suite(lexer_unit tests/unit/test_lexer_unit.c)
+add_test_suite(lexer_unit tests/unit/test_lexer_unit.c)
+add_test_suite(vm_unit tests/unit/test_vm_unit.c)
+add_test_suite(symbol_table_unit tests/unit/test_symbol_table_unit.c)
+add_test_suite(error_reporter_unit tests/unit/test_error_reporter_unit.c)
+add_test_suite(integration tests/integration/test_integration.c)
+add_test_suite(array_methods_unit tests/unit/test_array_methods_unit.c)
+add_test_suite(array_hof_unit tests/unit/test_array_hof_unit.c)
+add_test_suite(string_interp_unit tests/unit/test_string_interp_unit.c)
+add_test_suite(for_loop_unit tests/unit/test_for_loop_unit.c)
+add_test_suite(modulo_unit tests/unit/test_modulo_unit.c)
+add_test_suite(array_assign_unit tests/unit/test_array_assign_unit.c)
+add_test_suite(ast_unit tests/unit/test_ast_unit.c)
+add_test_suite(string_pool_unit tests/unit/test_string_pool_unit.c)
+add_test_suite(object_unit tests/unit/test_object_unit.c)
+add_test_suite(error_advanced_unit tests/unit/test_error_advanced_unit.c)
+add_test_suite(syntax_unit tests/unit/test_syntax_unit.c)
+add_test_suite(module_system_unit tests/unit/test_module_system_unit.c)
+add_test_suite(multi_module_unit tests/unit/test_multi_module_unit.c)
 
 # Create main executable
 add_executable(swift_like_lang src/main.c)
-target_link_libraries(swift_like_lang lang_lib)
+target_include_directories(swift_like_lang PRIVATE ${MINIZ_INCLUDE_DIRS})
 
+# Export symbols for native modules
+if(NOT WIN32)
+    target_link_libraries(swift_like_lang lang_lib miniz m)
+    # Export all symbols for dlopen'd modules
+    set_target_properties(swift_like_lang PROPERTIES
+        LINK_FLAGS "-Wl,-export-dynamic"
+    )
+else()
+    target_link_libraries(swift_like_lang lang_lib miniz)
+endif()
 # Create tools
 # Bundle creation tool
-add_executable(swb-create src/tools/bundle.c)
-target_link_libraries(swb-create lang_lib)
 
 # Set rpath for macOS
 if(APPLE)

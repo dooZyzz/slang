@@ -9,7 +9,7 @@ static void print_indent(void) {
     }
 }
 
-static void print_token_type(TokenType type) {
+static void print_token_type(SlangTokenType type) {
     switch (type) {
         case TOKEN_PLUS: printf("+"); break;
         case TOKEN_MINUS: printf("-"); break;

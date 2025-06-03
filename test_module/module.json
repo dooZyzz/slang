@@ -1,0 +1,10 @@
+{
+    "name": "simple_test",
+    "version": "1.0.0",
+    "type": "module",
+    "entry": "simple_test.swift",
+    "dependencies": {},
+    "exports": {
+        "main": "simple_test.swift"
+    }
+}

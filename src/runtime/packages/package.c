@@ -7,12 +7,15 @@
 #include "codegen/compiler.h"
 #include "ast/ast.h"
 #include "utils/compiler_wrapper.h"
+#include "utils/platform_compat.h"
+#include "utils/platform_dynlib.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <unistd.h>
-#include <dlfcn.h>
+#endif
 #include <sys/stat.h>
 
 // Forward declaration for module loading
@@ -1063,9 +1066,10 @@ void* package_load_native_library(ModuleMetadata* module) {
         #endif
     }
     
-    void* handle = dlopen(lib_path, RTLD_LAZY | RTLD_LOCAL);
+    void* handle = platform_dynlib_open(lib_path);
     if (!handle) {
-        fprintf(stderr, "Failed to load native library %s: %s\n", lib_path, dlerror());
+        const char* error = platform_dynlib_error();
+        fprintf(stderr, "Failed to load native library %s: %s\n", lib_path, error ? error : "unknown error");
     }
     
     return handle;
@@ -1193,18 +1197,19 @@ Module* package_load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* 
         free(full_sources);
         
         // Load the compiled library
-        module->native_handle = dlopen(compiled_lib, RTLD_LAZY);
+        module->native_handle = platform_dynlib_open(compiled_lib);
         
         if (!module->native_handle) {
             // Try with explicit extension
             char lib_with_ext[PATH_MAX];
             snprintf(lib_with_ext, sizeof(lib_with_ext), "%s", compiled_lib);
-            module->native_handle = dlopen(lib_with_ext, RTLD_LAZY);
+            module->native_handle = platform_dynlib_open(lib_with_ext);
         }
         
         free(compiled_lib);
         if (!module->native_handle) {
-            fprintf(stderr, "Failed to load native library %s: %s\n", compiled_lib, dlerror());
+            const char* error = platform_dynlib_error();
+            fprintf(stderr, "Failed to load native library %s: %s\n", compiled_lib, error ? error : "unknown error");
             module->state = MODULE_STATE_ERROR;
             return module;
         }
@@ -1225,7 +1230,7 @@ Module* package_load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* 
         }
         strcpy(init_fn_name + pos, "_module_init");
         
-        ModuleInitFn init_fn = (ModuleInitFn)dlsym(module->native_handle, init_fn_name);
+        ModuleInitFn init_fn = (ModuleInitFn)platform_dynlib_symbol(module->native_handle, init_fn_name);
         if (!init_fn) {
             fprintf(stderr, "Native module %s missing init function %s\n", module_name, init_fn_name);
             module->state = MODULE_STATE_ERROR;

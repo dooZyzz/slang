@@ -24,7 +24,7 @@ void set_allocator(Allocator* allocator);
     MEM_REALLOC(get_allocator(), ptr, old_size, new_size)
 
 #define FREE(ptr, size) \
-    MEM_FREE(get_allocator(), ptr, size)
+    SLANG_MEM_FREE(get_allocator(), ptr, size)
 
 #define STRDUP(str) \
     MEM_STRDUP(get_allocator(), str)

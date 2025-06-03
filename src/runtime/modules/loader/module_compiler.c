@@ -5,11 +5,12 @@
 #include "codegen/compiler.h"
 #include "runtime/core/vm.h"
 #include "utils/bytecode_format.h"
+#include "utils/platform_compat.h"
+#include "utils/platform_dir.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <dirent.h>
 #include <sys/stat.h>
 
 struct ModuleCompiler {
@@ -73,6 +74,8 @@ bool module_compiler_compile_file(ModuleCompiler* compiler,
     Chunk* chunk = malloc(sizeof(Chunk));
     chunk_init(chunk);
     
+    // For module compilation, we need a dummy module context
+    // The actual module will be created when loading
     if (!compile(program, chunk)) {
         set_error(compiler, "Compilation error in %s", source_path);
         chunk_free(chunk);
@@ -103,18 +106,19 @@ static bool compile_directory(ModuleCompiler* compiler,
                             const char* dir_path,
                             ModuleArchive* archive,
                             const char* base_path) {
-    DIR* dir = opendir(dir_path);
+    platform_dir_t* dir = platform_opendir(dir_path);
     if (!dir) {
         set_error(compiler, "Failed to open directory: %s", dir_path);
         return false;
     }
     
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
+    platform_dirent_t entry;
+    while (platform_readdir(dir, &entry)) {
+        const char* entry_name = entry.name;
+        if (entry_name[0] == '.') continue;
         
         char full_path[1024];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry_name);
         
         struct stat st;
         if (stat(full_path, &st) != 0) continue;
@@ -122,16 +126,16 @@ static bool compile_directory(ModuleCompiler* compiler,
         if (S_ISDIR(st.st_mode)) {
             // Recursively compile subdirectory
             if (!compile_directory(compiler, full_path, archive, base_path)) {
-                closedir(dir);
+                platform_closedir(dir);
                 return false;
             }
-        } else if (strstr(entry->d_name, ".swift") && !strstr(entry->d_name, ".swiftmodule")) {
+        } else if (strstr(entry_name, ".swift") && !strstr(entry_name, ".swiftmodule")) {
             // Compile Swift file
             uint8_t* bytecode;
             size_t bytecode_size;
             
             if (!module_compiler_compile_file(compiler, full_path, &bytecode, &bytecode_size)) {
-                closedir(dir);
+                platform_closedir(dir);
                 return false;
             }
             
@@ -155,7 +159,7 @@ static bool compile_directory(ModuleCompiler* compiler,
         }
     }
     
-    closedir(dir);
+    platform_closedir(dir);
     return true;
 }
 
@@ -265,19 +269,20 @@ bool module_compiler_build_package(ModuleCompiler* compiler,
     // Include source files if requested
     if (options && options->include_source) {
         // Add source files to archive
-        DIR* dir = opendir(metadata->path);
+        platform_dir_t* dir = platform_opendir(metadata->path);
         if (dir) {
-            struct dirent* entry;
-            while ((entry = readdir(dir)) != NULL) {
-                if (strstr(entry->d_name, ".swift")) {
+            platform_dirent_t entry;
+            while (platform_readdir(dir, &entry)) {
+                const char* entry_name = entry.name;
+                if (strstr(entry_name, ".swift")) {
                     char file_path[1024];
                     char archive_path[512];
-                    snprintf(file_path, sizeof(file_path), "%s/%s", metadata->path, entry->d_name);
-                    snprintf(archive_path, sizeof(archive_path), "source/%s", entry->d_name);
+                    snprintf(file_path, sizeof(file_path), "%s/%s", metadata->path, entry_name);
+                    snprintf(archive_path, sizeof(archive_path), "source/%s", entry_name);
                     module_archive_add_file(archive, file_path, archive_path);
                 }
             }
-            closedir(dir);
+            platform_closedir(dir);
         }
     }
     

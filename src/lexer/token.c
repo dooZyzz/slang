@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char* token_type_to_string(TokenType type) {
+const char* token_type_to_string(SlangTokenType type) {
     static const char* token_names[] = {
         [TOKEN_INTEGER] = "INTEGER",
         [TOKEN_FLOAT] = "FLOAT",
@@ -121,7 +121,7 @@ void token_free(Token* token) {
             token->type == TOKEN_STRING_INTERP_END) {
             // Tokens typically use parser allocator
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-            MEM_FREE(alloc, token->literal.string_value, 
+            SLANG_MEM_FREE(alloc, token->literal.string_value, 
                     strlen(token->literal.string_value) + 1);
             token->literal.string_value = NULL;
         }

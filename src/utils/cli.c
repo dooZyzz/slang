@@ -5,6 +5,7 @@
 #include "codegen/compiler.h"
 #include "runtime/core/vm.h"
 #include "runtime/modules/loader/module_loader.h"
+#include "runtime/modules/module_bundle.h"
 #include "runtime/packages/package.h"
 #include "runtime/modules/loader/module_compiler.h"
 #include "runtime/modules/extensions/module_hooks.h"
@@ -12,15 +13,25 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#include <io.h>  // For _isatty and _fileno on Windows
+#endif
 #include <sys/stat.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <sys/ioctl.h>
-#include <getopt.h>
-#include <glob.h>
+#endif
+#include "utils/platform_compat.h"
+#include "utils/platform_getopt.h"
+#include "utils/platform_glob.h"
 #include <errno.h>
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
+#ifdef _WIN32
+#include <windows.h>
 #endif
 
 #include "debug/debug.h"
@@ -28,6 +39,9 @@
 #include "utils/bytecode_format.h"
 #include "utils/allocators.h"
 #include "miniz.h"
+
+// Define MAX_INPUT for REPL input buffer
+#define MAX_INPUT 1024
 
 // Global CLI configuration
 CLIConfig g_cli_config = {
@@ -87,6 +101,8 @@ static const Command commands[] = {
         .usage = "run [file] [options]",
         .help = "Run a SwiftLang file or the current project.\n"
                 "Options:\n"
+                "  --swb <bundle>   Run a .swiftmodule bundle\n"
+                "  --bundle <file>  Alternative to --swb\n"
                 "  --args <args>    Arguments to pass to the program\n"
                 "  --watch          Watch for file changes and re-run"
     },
@@ -212,6 +228,9 @@ static const Command commands[] = {
 };
 
 static const int num_commands = sizeof(commands) / sizeof(commands[0]);
+
+// Forward declaration
+int cli_run_bundle(const char* bundle_path);
 
 // Long options for getopt
 static struct option long_options[] = {
@@ -545,6 +564,35 @@ int cli_main(int argc, char* argv[]) {
     // Parse global options first
     cli_parse_args(argc, argv);
     
+    // Parse SWIFTLANG_MODULE_PATH environment variable
+    const char* env_module_path = getenv("SWIFTLANG_MODULE_PATH");
+    if (env_module_path) {
+        // Parse colon-separated paths (or semicolon on Windows)
+        char* paths = strdup(env_module_path);
+        char* path = strtok(paths, 
+#ifdef _WIN32
+            ";"
+#else
+            ":"
+#endif
+        );
+        while (path) {
+            int count = g_cli_config.module_path_count;
+            g_cli_config.module_paths = realloc(g_cli_config.module_paths, 
+                                               (count + 1) * sizeof(char*));
+            g_cli_config.module_paths[count] = strdup(path);
+            g_cli_config.module_path_count++;
+            path = strtok(NULL, 
+#ifdef _WIN32
+                ";"
+#else
+                ":"
+#endif
+            );
+        }
+        free(paths);
+    }
+    
     // Check if no arguments provided
     if (optind >= argc) {
         cli_print_help(argv[0]);
@@ -789,11 +837,25 @@ int cli_cmd_build(int argc, char* argv[]) {
 
 int cli_cmd_run(int argc, char* argv[]) {
     const char* file_to_run = NULL;
+    bool is_bundle = false;
     
-    // Check if a file was specified
-    if (argc > 1 && argv[1][0] != '-') {
-        file_to_run = argv[1];
-    } else if (cli_file_exists("manifest.json")) {
+    // Parse arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--swb") == 0 || strcmp(argv[i], "--bundle") == 0) {
+            if (i + 1 < argc) {
+                file_to_run = argv[++i];
+                is_bundle = true;
+            } else {
+                cli_print_error("--swb requires a bundle file path");
+                return 1;
+            }
+        } else if (argv[i][0] != '-') {
+            file_to_run = argv[i];
+        }
+    }
+    
+    // If no file specified, try to run project main file
+    if (!file_to_run && cli_file_exists("manifest.json")) {
         // Try to run project main file
         ModuleMetadata* metadata = package_load_module_metadata(".");
         if (metadata && metadata->main_file) {
@@ -814,7 +876,19 @@ int cli_cmd_run(int argc, char* argv[]) {
         return 1;
     }
     
-    return cli_run_file(file_to_run);
+    // Check if it's a bundle file by extension if not explicitly specified
+    if (!is_bundle) {
+        const char* ext = strrchr(file_to_run, '.');
+        if (ext && strcmp(ext, ".swiftmodule") == 0) {
+            is_bundle = true;
+        }
+    }
+    
+    if (is_bundle) {
+        return cli_run_bundle(file_to_run);
+    } else {
+        return cli_run_file(file_to_run);
+    }
 }
 
 int cli_cmd_test(int argc, char* argv[]) {
@@ -977,15 +1051,24 @@ bool cli_copy_file(const char* src, const char* dst) {
 }
 
 int cli_get_terminal_width(void) {
+#ifdef _WIN32
+    // Windows implementation - just return default width
+    return 80;
+#else
     struct winsize w;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
         return w.ws_col;
     }
     return 80; // default
+#endif
 }
 
 bool cli_is_terminal(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout));
+#else
     return isatty(STDOUT_FILENO);
+#endif
 }
 
 bool cli_confirm(const char* message) {
@@ -1088,6 +1171,39 @@ void cli_progress_free(CLIProgress* progress) {
     free(progress);
 }
 
+// Platform-specific function to get executable path
+static bool cli_get_executable_path(char* buffer, size_t size) {
+#ifdef _WIN32
+    DWORD length = GetModuleFileNameA(NULL, buffer, (DWORD)size);
+    if (length > 0 && length < size) {
+        buffer[length] = '\0';
+        return true;
+    }
+    return false;
+#elif defined(__APPLE__)
+    uint32_t buf_size = (uint32_t)size;
+    if (_NSGetExecutablePath(buffer, &buf_size) == 0) {
+        // Resolve to absolute path
+        char* resolved = realpath(buffer, NULL);
+        if (resolved) {
+            strncpy(buffer, resolved, size - 1);
+            buffer[size - 1] = '\0';
+            free(resolved);
+            return true;
+        }
+    }
+    return false;
+#else
+    // Linux and other Unix-like systems
+    ssize_t len = readlink("/proc/self/exe", buffer, size - 1);
+    if (len > 0) {
+        buffer[len] = '\0';
+        return true;
+    }
+    return false;
+#endif
+}
+
 // File reading utility
 static char* read_file(const char* path) {
     FILE* file = fopen(path, "rb");
@@ -1157,8 +1273,8 @@ static bool needs_more_input(const char* input) {
 }
 
 void cli_run_repl(void) {
-    const int MAX_LINE = 1024;
-    const int MAX_INPUT_SIZE = 8192;
+    #define MAX_LINE 1024
+    #define MAX_INPUT_SIZE 8192
     char line[MAX_LINE];
     char input[MAX_INPUT_SIZE];
     
@@ -1181,7 +1297,7 @@ void cli_run_repl(void) {
             }
             
             // Append line to input buffer
-            if (strlen(input) + strlen(line) >= MAX_INPUT - 1) {
+            if (strlen(input) + strlen(line) >= MAX_INPUT_SIZE - 1) {
                 cli_print_error("Input too long");
                 input[0] = '\0';
                 break;
@@ -1311,6 +1427,15 @@ int cli_run_file(const char* path) {
     if (g_cli_config.debug_bytecode) {
         printf("\n=== Bytecode ===\n");
         disassemble_chunk(&chunk, path);
+        
+        // Also disassemble function chunks
+        for (size_t i = 0; i < chunk.constants.count; i++) {
+            if (IS_FUNCTION(chunk.constants.values[i])) {
+                Function* func = AS_FUNCTION(chunk.constants.values[i]);
+                printf("\n== Function: %s ==\n", func->name);
+                disassemble_chunk(&func->chunk, func->name);
+            }
+        }
         printf("\n");
     }
     
@@ -1350,17 +1475,14 @@ int cli_run_file(const char* path) {
     // Add default search paths
     // Add modules directory relative to executable
     char exe_path[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-    if (len == -1) {
-        // macOS doesn't have /proc/self/exe, use different method
-        uint32_t size = sizeof(exe_path);
-        if (_NSGetExecutablePath(exe_path, &size) == 0) {
-            len = strlen(exe_path);
-        }
-    }
-    if (len > 0) {
-        exe_path[len] = '\0';
+    if (cli_get_executable_path(exe_path, sizeof(exe_path))) {
         char* last_slash = strrchr(exe_path, '/');
+#ifdef _WIN32
+        char* last_backslash = strrchr(exe_path, '\\');
+        if (last_backslash && (!last_slash || last_backslash > last_slash)) {
+            last_slash = last_backslash;
+        }
+#endif
         if (last_slash) {
             *last_slash = '\0';
             char modules_path[PATH_MAX];
@@ -1370,7 +1492,8 @@ int cli_run_file(const char* path) {
         }
     }
     
-    // Add project modules directory
+    // Add project modules directory and current directory
+    module_loader_add_search_path(vm.module_loader, ".");
     module_loader_add_search_path(vm.module_loader, "./modules");
     module_loader_add_search_path(vm.module_loader, "modules");
     
@@ -1388,6 +1511,90 @@ int cli_run_file(const char* path) {
     module_loader_destroy(loader);
     
     LOG_DEBUG(LOG_MODULE_CLI, "Execution completed with result: %d", result);
+    
+    if (result == INTERPRET_COMPILE_ERROR) return 65;
+    if (result == INTERPRET_RUNTIME_ERROR) return 70;
+    return 0;
+}
+
+int cli_run_bundle(const char* bundle_path) {
+    LOG_INFO(LOG_MODULE_CLI, "Running bundle: %s", bundle_path);
+    
+    // Create VM
+    VM vm;
+    vm_init(&vm);
+    ModuleLoader* loader = module_loader_create(&vm);
+    vm.module_loader = loader;
+    
+    // Add custom module paths to VM's module loader
+    for (int i = 0; i < g_cli_config.module_path_count; i++) {
+        module_loader_add_search_path(vm.module_loader, g_cli_config.module_paths[i]);
+    }
+    
+    // Extract module name from bundle path
+    const char* module_name = bundle_path;
+    const char* last_slash = strrchr(bundle_path, '/');
+    if (last_slash) {
+        module_name = last_slash + 1;
+    }
+    
+    // Remove .swiftmodule extension if present
+    char module_name_buf[256];
+    strncpy(module_name_buf, module_name, sizeof(module_name_buf) - 1);
+    module_name_buf[sizeof(module_name_buf) - 1] = '\0';
+    char* dot = strrchr(module_name_buf, '.');
+    if (dot && strcmp(dot, ".swiftmodule") == 0) {
+        *dot = '\0';
+    }
+    
+    // Load and execute the bundle
+    Module* module = module_load(loader, bundle_path, false);
+    if (!module) {
+        cli_print_error("Failed to load bundle: %s", bundle_path);
+        module_loader_destroy(loader);
+        vm_free(&vm);
+        return 1;
+    }
+    
+    // Ensure module is initialized (this executes the module's bytecode)
+    if (!ensure_module_initialized(module, &vm)) {
+        cli_print_error("Failed to initialize module");
+        module_loader_destroy(loader);
+        vm_free(&vm);
+        return 1;
+    }
+    
+    // Set up for execution trace if requested
+    if (g_cli_config.debug_trace) {
+        vm.debug_trace = true;
+    }
+    
+    // Check if module has bytecode chunk to execute
+    InterpretResult result = INTERPRET_OK;
+    if (module->chunk && module->chunk->count > 0) {
+        // Execute the module's bytecode
+        result = vm_interpret(&vm, module->chunk);
+    } else {
+        // Look for explicit main function in module exports
+        TaggedValue* main_val = NULL;
+        for (size_t i = 0; i < module->exports.count; i++) {
+            if (strcmp(module->exports.names[i], "main") == 0) {
+                main_val = &module->exports.values[i];
+                break;
+            }
+        }
+        
+        if (main_val && IS_FUNCTION(*main_val)) {
+            result = vm_interpret_function(&vm, AS_FUNCTION(*main_val));
+        } else {
+            // Nothing to execute - module may just export functions/values
+            LOG_INFO(LOG_MODULE_CLI, "Module loaded successfully but has no main entry point");
+        }
+    }
+    
+    // Cleanup
+    module_loader_destroy(loader);
+    vm_free(&vm);
     
     if (result == INTERPRET_COMPILE_ERROR) return 65;
     if (result == INTERPRET_RUNTIME_ERROR) return 70;
@@ -1832,206 +2039,185 @@ int cli_cmd_bundle(int argc, char* argv[]) {
         return 1;
     }
     
-    // Read manifest
-    Manifest* manifest = manifest_read(manifest_file);
-    if (!manifest) {
+    cli_print_info("Reading manifest from %s...", manifest_file);
+    
+    // Read manifest to get module name and version  
+    char* manifest_content = read_file(manifest_file);
+    if (!manifest_content) {
         cli_print_error("Failed to read %s", manifest_file);
         return 1;
     }
     
-    const char* module_name = manifest->name ? manifest->name : "unknown";
+    // Simple JSON parsing to extract name and version
+    const char* module_name = "unknown";
+    const char* module_version = "1.0.0";
     
+    // Extract name
+    char* name_start = strstr(manifest_content, "\"name\"");
+    if (name_start) {
+        name_start = strchr(name_start, ':');
+        if (name_start) {
+            name_start = strchr(name_start, '"');
+            if (name_start) {
+                name_start++; // Skip opening quote
+                char* name_end = strchr(name_start, '"');
+                if (name_end) {
+                    size_t name_len = name_end - name_start;
+                    char* name_copy = malloc(name_len + 1);
+                    strncpy(name_copy, name_start, name_len);
+                    name_copy[name_len] = '\0';
+                    module_name = name_copy;
+                }
+            }
+        }
+    }
+    
+    // Extract version
+    char* version_start = strstr(manifest_content, "\"version\"");
+    if (version_start) {
+        version_start = strchr(version_start, ':');
+        if (version_start) {
+            version_start = strchr(version_start, '"');
+            if (version_start) {
+                version_start++; // Skip opening quote
+                char* version_end = strchr(version_start, '"');
+                if (version_end) {
+                    size_t version_len = version_end - version_start;
+                    char* version_copy = malloc(version_len + 1);
+                    strncpy(version_copy, version_start, version_len);
+                    version_copy[version_len] = '\0';
+                    module_version = version_copy;
+                }
+            }
+        }
+    }
+    
+    // Set default output if not specified
     if (!output) {
         char default_output[256];
         snprintf(default_output, sizeof(default_output), "%s.swiftmodule", module_name);
         output = strdup(default_output);
     }
     
-    cli_print_info("Creating bundle %s...", output);
+    cli_print_info("Creating bundle for module '%s' version '%s'...", module_name, module_version);
     
-    // Create build directory
-    ensure_directory_exists("build");
-    ensure_directory_exists("build/bytecode");
+    // Create module bundle using the module_bundle API
+    ModuleBundle* bundle = module_bundle_create(module_name, module_version);
+    if (!bundle) {
+        ModuleBundleError error = module_bundle_get_last_error();
+        cli_print_error("Failed to create module bundle: %s", module_bundle_error_string(error));
+        free(manifest_content);
+        return 1;
+    }
     
-    // Compile all source files to bytecode
-    cli_print_info("Compiling source files...");
-    int compiled_count = 0;
+    // Set metadata from manifest
+    module_bundle_set_metadata(bundle, "description", "Module created via CLI");
+    module_bundle_set_metadata(bundle, "main", "main.swift");
     
-    // Get list of source files
+    // Compile and add source files to bundle
     glob_t glob_result;
+    int compiled_count = 0;
+
     if (glob("*.swift", GLOB_TILDE, NULL, &glob_result) == 0) {
+        cli_print_info("Found %zu Swift source files", glob_result.gl_pathc);
+        
         for (size_t i = 0; i < glob_result.gl_pathc; i++) {
             const char* source_file = glob_result.gl_pathv[i];
             cli_print_info("  Compiling %s...", source_file);
             
-            // Read source
+            // Read source file
             char* source = read_file(source_file);
             if (!source) {
                 cli_print_error("Failed to read %s", source_file);
                 continue;
             }
             
-            // Parse
+            // Parse source code
             Parser* parser = parser_create(source);
             ProgramNode* program = parser_parse_program(parser);
             
-            if (!parser->had_error) {
-                // Compile to bytecode
-                Chunk chunk;
-                chunk_init(&chunk);
-                
-                if (compile(program, &chunk)) {
-                    // Save bytecode
-                    char bytecode_path[PATH_MAX];
-                    snprintf(bytecode_path, sizeof(bytecode_path), "build/bytecode/%s.swiftbc", source_file);
-                    
-                    // Remove .swift extension
-                    char* ext = strrchr(bytecode_path, '.');
-                    if (ext && strcmp(ext, ".swift.swiftbc") == 0) {
-                        strcpy(ext, ".swiftbc");
-                    }
-                    
-                    uint8_t* bytecode_data;
-                    size_t bytecode_size;
-                    if (bytecode_serialize(&chunk, &bytecode_data, &bytecode_size)) {
-                        FILE* f = fopen(bytecode_path, "wb");
-                        if (f) {
-                            fwrite(bytecode_data, 1, bytecode_size, f);
-                            fclose(f);
-                            compiled_count++;
-                        }
-                        free(bytecode_data);
-                    }
-                }
-                
-                chunk_free(&chunk);
+            if (parser->had_error || !program) {
+                cli_print_warning("Failed to parse %s", source_file);
+                if (program) program_destroy(program);
+                parser_destroy(parser);
+                free(source);
+                continue;
             }
             
+            // Compile to bytecode
+            Chunk chunk;
+            chunk_init(&chunk);
+            
+            if (!compile(program, &chunk)) {
+                cli_print_warning("Failed to compile %s", source_file);
+                chunk_free(&chunk);
+                program_destroy(program);
+                parser_destroy(parser);
+                free(source);
+                continue;
+            }
+            
+            // Serialize bytecode
+            uint8_t* bytecode_data;
+            size_t bytecode_size;
+            if (!bytecode_serialize(&chunk, &bytecode_data, &bytecode_size)) {
+                cli_print_warning("Failed to serialize bytecode for %s", source_file);
+                chunk_free(&chunk);
+                program_destroy(program);
+                parser_destroy(parser);
+                free(source);
+                continue;
+            }
+            
+            // Generate module name
+            char module_name_buf[256];
+            strncpy(module_name_buf, source_file, sizeof(module_name_buf) - 1);
+            module_name_buf[sizeof(module_name_buf) - 1] = '\0';
+            
+            // Remove .swift extension
+            char* ext = strrchr(module_name_buf, '.');
+            if (ext && strcmp(ext, ".swift") == 0) {
+                *ext = '\0';
+            }
+            
+            // Add bytecode to bundle
+            if (module_bundle_add_bytecode(bundle, module_name_buf, bytecode_data, bytecode_size)) {
+                compiled_count++;
+                cli_print_info("    -> Compiled to bytecode (%zu bytes)", bytecode_size);
+            } else {
+                cli_print_warning("Failed to add bytecode for %s to bundle", source_file);
+            }
+            
+            // Clean up
+            free(bytecode_data);
+            chunk_free(&chunk);
             program_destroy(program);
             parser_destroy(parser);
             free(source);
         }
         globfree(&glob_result);
     }
-    
-    cli_print_info("Compiled %d source files", compiled_count);
-    
-    // Create ZIP archive
-    cli_print_info("Creating archive...");
-    
-    mz_zip_archive zip;
-    memset(&zip, 0, sizeof(zip));
-    
-    if (!mz_zip_writer_init_file(&zip, output, 0)) {
-        cli_print_error("Failed to create archive %s", output);
-        manifest_free(manifest);
-        return 1;
+
+    cli_print_info("Compiled %d files to bytecode", compiled_count);
+
+    // Add original manifest to bundle for reference
+    if (!module_bundle_add_file(bundle, manifest_file, "original_manifest.json")) {
+        cli_print_warning("Failed to add original manifest to bundle");
     }
-    
-    // Add manifest.json
-    char* manifest_content = read_file(manifest_file);
-    if (manifest_content) {
-        mz_zip_writer_add_mem(&zip, "manifest.json", manifest_content, strlen(manifest_content), MZ_DEFAULT_COMPRESSION);
+
+    // Save the bundle using the module_bundle API
+    cli_print_info("Saving bundle to %s...", output);
+    if (!module_bundle_save(bundle, output)) {
+        ModuleBundleError error = module_bundle_get_last_error();
+        cli_print_error("Failed to save bundle: %s", module_bundle_error_string(error));
+        module_bundle_release(bundle);
         free(manifest_content);
-    }
-    
-    // Add bytecode files
-    if (glob("build/bytecode/*.swiftbc", GLOB_TILDE, NULL, &glob_result) == 0) {
-        for (size_t i = 0; i < glob_result.gl_pathc; i++) {
-            const char* bytecode_file = glob_result.gl_pathv[i];
-            const char* rel_path = strstr(bytecode_file, "build/");
-            if (rel_path) rel_path += 6; // Skip "build/"
-            else rel_path = bytecode_file;
-            
-            char* content = read_file(bytecode_file);
-            if (content) {
-                // Need to read as binary
-                FILE* f = fopen(bytecode_file, "rb");
-                if (f) {
-                    fseek(f, 0, SEEK_END);
-                    long size = ftell(f);
-                    fseek(f, 0, SEEK_SET);
-                    uint8_t* data = malloc(size);
-                    fread(data, 1, size, f);
-                    fclose(f);
-                    
-                    mz_zip_writer_add_mem(&zip, rel_path, data, size, MZ_DEFAULT_COMPRESSION);
-                    free(data);
-                }
-                free(content);
-            }
-        }
-        globfree(&glob_result);
-    }
-    
-    // Add native libraries
-    if (glob("lib/*.dylib", GLOB_TILDE, NULL, &glob_result) == 0) {
-        for (size_t i = 0; i < glob_result.gl_pathc; i++) {
-            const char* lib_file = glob_result.gl_pathv[i];
-            FILE* f = fopen(lib_file, "rb");
-            if (f) {
-                fseek(f, 0, SEEK_END);
-                long size = ftell(f);
-                fseek(f, 0, SEEK_SET);
-                uint8_t* data = malloc(size);
-                fread(data, 1, size, f);
-                fclose(f);
-                
-                mz_zip_writer_add_mem(&zip, lib_file, data, size, MZ_DEFAULT_COMPRESSION);
-                free(data);
-            }
-        }
-        globfree(&glob_result);
-    }
-    
-    // Also check for .so and .dll files
-    const char* lib_patterns[] = {"lib/*.so", "lib/*.dll", NULL};
-    for (int i = 0; lib_patterns[i]; i++) {
-        if (glob(lib_patterns[i], GLOB_TILDE, NULL, &glob_result) == 0) {
-            for (size_t j = 0; j < glob_result.gl_pathc; j++) {
-                const char* lib_file = glob_result.gl_pathv[j];
-                FILE* f = fopen(lib_file, "rb");
-                if (f) {
-                    fseek(f, 0, SEEK_END);
-                    long size = ftell(f);
-                    fseek(f, 0, SEEK_SET);
-                    uint8_t* data = malloc(size);
-                    fread(data, 1, size, f);
-                    fclose(f);
-                    
-                    mz_zip_writer_add_mem(&zip, lib_file, data, size, MZ_DEFAULT_COMPRESSION);
-                    free(data);
-                }
-            }
-            globfree(&glob_result);
-        }
-    }
-    
-    if (include_deps) {
-        cli_print_info("Including dependencies in bundle...");
-        // TODO: Bundle dependencies from node_modules
-    }
-    
-    if (minify) {
-        cli_print_info("Minifying bytecode...");
-        // TODO: Minify bytecode
-    }
-    
-    if (sign) {
-        cli_print_info("Signing bundle...");
-        // TODO: Sign bundle with checksums
-    }
-    
-    // Finalize ZIP
-    if (!mz_zip_writer_finalize_archive(&zip)) {
-        cli_print_error("Failed to finalize archive");
-        mz_zip_writer_end(&zip);
-        manifest_free(manifest);
         return 1;
     }
-    
-    mz_zip_writer_end(&zip);
-    manifest_free(manifest);
+
+    // Clean up
+    module_bundle_release(bundle);
+    free(manifest_content);
     
     // Get file size
     struct stat st;

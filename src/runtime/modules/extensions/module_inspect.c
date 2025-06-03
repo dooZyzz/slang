@@ -5,10 +5,10 @@
 #include "utils/hash_map.h"
 #include "utils/allocators.h"
 #include "runtime/modules/module_allocator_macros.h"
+#include "utils/platform_fnmatch.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
-#include <fnmatch.h>
 
 /**
  * Implementation of module metadata inspection API.

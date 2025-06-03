@@ -119,10 +119,10 @@ typedef enum {
     TOKEN_ERROR,
     
     TOKEN_COUNT
-} TokenType;
+} SlangTokenType;
 
 typedef struct {
-    TokenType type;
+    SlangTokenType type;
     const char* lexeme;
     size_t lexeme_length;
     size_t line;
@@ -136,7 +136,7 @@ typedef struct {
     } literal;
 } Token;
 
-const char* token_type_to_string(TokenType type);
+const char* token_type_to_string(SlangTokenType type);
 void token_free(Token* token);
 
 #endif

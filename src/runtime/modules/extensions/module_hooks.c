@@ -3,8 +3,8 @@
 #include "utils/allocators.h"
 #include "runtime/modules/module_allocator_macros.h"
 #include "runtime/core/vm.h"
+#include "utils/platform_threads.h"
 #include <string.h>
-#include <pthread.h>
 #include <stdio.h>
 
 /**
@@ -31,7 +31,7 @@ static struct {
     HashMap* module_hooks;          // Module name -> ModuleHooks
     GlobalHookEntry* global_hooks;  // Sorted list of global hooks
     int next_global_id;
-    pthread_mutex_t lock;
+    platform_mutex_t lock;
     
     // Statistics
     size_t total_hooks;
@@ -44,7 +44,7 @@ void module_hooks_init(void) {
     g_hook_system.module_hooks = hash_map_create();
     g_hook_system.global_hooks = NULL;
     g_hook_system.next_global_id = 1;
-    pthread_mutex_init(&g_hook_system.lock, NULL);
+    platform_mutex_init(&g_hook_system.lock);
     g_hook_system.total_hooks = 0;
     g_hook_system.executions = 0;
     g_hook_system.failures = 0;
@@ -52,7 +52,7 @@ void module_hooks_init(void) {
 
 // Cleanup hooks system
 void module_hooks_cleanup(void) {
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     // Free module-specific hooks
     if (g_hook_system.module_hooks) {
@@ -70,15 +70,15 @@ void module_hooks_cleanup(void) {
     }
     g_hook_system.global_hooks = NULL;
     
-    pthread_mutex_unlock(&g_hook_system.lock);
-    pthread_mutex_destroy(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_destroy(&g_hook_system.lock);
 }
 
 // Set hooks for a specific module
 bool module_set_hooks(const char* module_name, const ModuleHooks* hooks) {
     if (!module_name || !hooks) return false;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
@@ -93,7 +93,7 @@ bool module_set_hooks(const char* module_name, const ModuleHooks* hooks) {
     hash_map_put(g_hook_system.module_hooks, module_name, entry);
     g_hook_system.total_hooks++;
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
     return true;
 }
 
@@ -101,9 +101,9 @@ bool module_set_hooks(const char* module_name, const ModuleHooks* hooks) {
 const ModuleHooks* module_get_hooks(const char* module_name) {
     if (!module_name) return NULL;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module_name);
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
     
     return entry ? &entry->hooks : NULL;
 }
@@ -112,7 +112,7 @@ const ModuleHooks* module_get_hooks(const char* module_name) {
 void module_remove_hooks(const char* module_name) {
     if (!module_name) return;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module_name);
     if (entry) {
@@ -122,14 +122,14 @@ void module_remove_hooks(const char* module_name) {
         g_hook_system.total_hooks--;
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }
 
 // Register global hooks
 int module_register_global_hooks(const GlobalModuleHooks* hooks, int priority) {
     if (!hooks) return -1;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     
@@ -151,13 +151,13 @@ int module_register_global_hooks(const GlobalModuleHooks* hooks, int priority) {
     g_hook_system.total_hooks++;
     int id = new_entry->id;
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
     return id;
 }
 
 // Unregister global hooks
 void module_unregister_global_hooks(int hook_id) {
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     
@@ -173,7 +173,7 @@ void module_unregister_global_hooks(int hook_id) {
         current = &(*current)->next;
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }
 
 // Execute initialization hooks
@@ -181,7 +181,7 @@ bool module_execute_init_hooks(Module* module, VM* vm) {
     if (!module) return true;
     
     bool success = true;
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     g_hook_system.executions++;
     
     // Execute global before_init hooks
@@ -220,7 +220,7 @@ bool module_execute_init_hooks(Module* module, VM* vm) {
         g_hook_system.failures++;
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
     return success;
 }
 
@@ -228,7 +228,7 @@ bool module_execute_init_hooks(Module* module, VM* vm) {
 void module_execute_first_use_hooks(Module* module, VM* vm) {
     if (!module) return;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     g_hook_system.executions++;
     
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module->path);
@@ -236,14 +236,14 @@ void module_execute_first_use_hooks(Module* module, VM* vm) {
         entry->hooks.on_first_use(module, vm);
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }
 
 // Execute unload hooks
 void module_execute_unload_hooks(Module* module, VM* vm) {
     if (!module) return;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     g_hook_system.executions++;
     
     // Execute global before_unload hooks
@@ -276,14 +276,14 @@ void module_execute_unload_hooks(Module* module, VM* vm) {
         global = global->next;
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }
 
 // Execute error hooks
 void module_execute_error_hooks(Module* module, VM* vm, const char* error) {
     if (!module) return;
     
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     g_hook_system.executions++;
     
     HookEntry* entry = (HookEntry*)hash_map_get(g_hook_system.module_hooks, module->path);
@@ -291,7 +291,7 @@ void module_execute_error_hooks(Module* module, VM* vm, const char* error) {
         entry->hooks.on_error(module, vm, error);
     }
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }
 
 // SwiftLang script hooks implementation
@@ -382,11 +382,11 @@ bool module_set_script_unload_hook(const char* module_name, const char* unload_f
 
 // Get hook statistics
 void module_hooks_stats(size_t* total_hooks, size_t* executions, size_t* failures) {
-    pthread_mutex_lock(&g_hook_system.lock);
+    platform_mutex_lock(&g_hook_system.lock);
     
     if (total_hooks) *total_hooks = g_hook_system.total_hooks;
     if (executions) *executions = g_hook_system.executions;
     if (failures) *failures = g_hook_system.failures;
     
-    pthread_mutex_unlock(&g_hook_system.lock);
+    platform_mutex_unlock(&g_hook_system.lock);
 }

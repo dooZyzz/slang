@@ -120,6 +120,7 @@ typedef enum {
     
     // Long constants
     OP_CONSTANT_LONG,
+    OP_CLOSURE_LONG,
     
     // Type conversion
     OP_TO_STRING,
@@ -240,6 +241,9 @@ typedef struct {
     
     // Current module context (for accessing module globals)
     struct Module* current_module;
+    
+    // Debug trace flag
+    bool debug_trace;
 } VM;
 
 typedef enum {
@@ -261,6 +265,7 @@ void vm_free(VM* vm);
 VM* vm_create(void);
 void vm_destroy(VM* vm);
 InterpretResult vm_interpret(VM* vm, Chunk* chunk);
+InterpretResult vm_interpret_function(VM* vm, Function* function);
 void vm_push(VM* vm, TaggedValue value);
 TaggedValue vm_pop(VM* vm);
 

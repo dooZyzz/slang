@@ -13,12 +13,15 @@
 #include "utils/hash_map.h"
 #include "utils/allocators.h"
 #include "runtime/modules/module_allocator_macros.h"
+#include "utils/platform_compat.h"
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <miniz.h>
 
 /**
@@ -143,8 +146,14 @@ void* bundle_builder_create(const BundleOptions* options) {
     }
     
     // Create temporary directory
+#ifdef _WIN32
+    char temp_template[MAX_PATH];
+    GetTempPathA(MAX_PATH, temp_template);
+    strcat(temp_template, "swiftbundle.XXXXXX");
+#else
     char temp_template[] = "/tmp/swiftbundle.XXXXXX";
-    builder->temp_path = mkdtemp(temp_template);
+#endif
+    builder->temp_path = platform_mkdtemp(temp_template);
     if (!builder->temp_path) {
         bundle_builder_destroy(builder);
         return NULL;

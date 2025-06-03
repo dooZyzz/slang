@@ -28,7 +28,7 @@ void builtin_module_register(const char* name, void (*init_func)(void)) {
         
         if (module_registry.modules) {
             memcpy(new_modules, module_registry.modules, old_capacity * sizeof(BuiltinModule));
-            MEM_FREE(alloc, module_registry.modules, old_capacity * sizeof(BuiltinModule));
+            SLANG_MEM_FREE(alloc, module_registry.modules, old_capacity * sizeof(BuiltinModule));
         }
         
         module_registry.modules = new_modules;
@@ -63,7 +63,7 @@ static void register_export(const char* name, NativeFn func) {
     if (new_names) {
         if (current_module->exports.names) {
             memcpy(new_names, current_module->exports.names, old_size);
-            MEM_FREE(alloc, current_module->exports.names, old_size);
+            SLANG_MEM_FREE(alloc, current_module->exports.names, old_size);
         }
         current_module->exports.names = new_names;
     }
@@ -75,7 +75,7 @@ static void register_export(const char* name, NativeFn func) {
     if (new_functions) {
         if (current_module->exports.functions) {
             memcpy(new_functions, current_module->exports.functions, old_size);
-            MEM_FREE(alloc, current_module->exports.functions, old_size);
+            SLANG_MEM_FREE(alloc, current_module->exports.functions, old_size);
         }
         current_module->exports.functions = new_functions;
     }
@@ -437,31 +437,31 @@ void builtin_modules_cleanup(void) {
         
         // Free module name
         if (module->name) {
-            MEM_FREE(alloc, (char*)module->name, strlen(module->name) + 1);
+            SLANG_MEM_FREE(alloc, (char*)module->name, strlen(module->name) + 1);
         }
         
         // Free export names
         for (size_t j = 0; j < module->exports.count; j++) {
             if (module->exports.names[j]) {
-                MEM_FREE(alloc, (char*)module->exports.names[j], 
+                SLANG_MEM_FREE(alloc, (char*)module->exports.names[j], 
                         strlen(module->exports.names[j]) + 1);
             }
         }
         
         // Free arrays
         if (module->exports.names) {
-            MEM_FREE(alloc, module->exports.names, 
+            SLANG_MEM_FREE(alloc, module->exports.names, 
                     module->exports.count * sizeof(char*));
         }
         if (module->exports.functions) {
-            MEM_FREE(alloc, module->exports.functions, 
+            SLANG_MEM_FREE(alloc, module->exports.functions, 
                     module->exports.count * sizeof(NativeFn));
         }
     }
     
     // Free module registry
     if (module_registry.modules) {
-        MEM_FREE(alloc, module_registry.modules, 
+        SLANG_MEM_FREE(alloc, module_registry.modules, 
                 module_registry.capacity * sizeof(BuiltinModule));
     }
     

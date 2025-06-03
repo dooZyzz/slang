@@ -75,7 +75,7 @@ struct Allocator {
 #define MEM_REALLOC_TAGGED(allocator, ptr, old_size, new_size, tag) \
     mem_realloc(allocator, ptr, old_size, new_size, __FILE__, __LINE__, tag)
 
-#define MEM_FREE(allocator, ptr, size) \
+#define SLANG_MEM_FREE(allocator, ptr, size) \
     mem_free(allocator, ptr, size, __FILE__, __LINE__)
 
 #define MEM_DUP(allocator, ptr, size) \

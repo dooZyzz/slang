@@ -1,10 +1,12 @@
 #include "utils/logger.h"
+#include "utils/platform_compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
-#include <strings.h>
+#endif
 
 // ANSI color codes
 #define COLOR_RESET   "\x1b[0m"

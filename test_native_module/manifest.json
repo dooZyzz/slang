@@ -1,0 +1,14 @@
+{
+  "name": "native-test",
+  "version": "1.0.0",
+  "description": "Test native interop",
+  "main": "main.swift",
+  "type": "library",
+  "sources": [
+    "wrapper.swift"
+  ],
+  "native": {
+    "sources": ["native.c"],
+    "output": "native_test.so"
+  }
+}

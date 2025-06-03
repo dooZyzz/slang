@@ -1,0 +1,7 @@
+{
+  "name": "test_project",
+  "version": "0.1.0",
+  "description": "A new SwiftLang project",
+  "main": "main.swift",
+  "type": "application"
+}

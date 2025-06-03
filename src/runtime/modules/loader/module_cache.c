@@ -2,11 +2,13 @@
 #include "runtime/modules/loader/module_loader.h"
 #include "utils/hash_map.h"
 #include "utils/allocators.h"
+#include "utils/platform_threads.h"
 #include <string.h>
-#include <pthread.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <time.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 #include "runtime/modules/module_allocator_macros.h"
 
@@ -20,7 +22,7 @@
 typedef struct ModuleCache
 {
     HashMap* modules; // Path -> Module mapping
-    pthread_rwlock_t lock; // Read-write lock for thread safety
+    platform_rwlock_t lock; // Read-write lock for thread safety
     size_t hit_count; // Cache statistics
     size_t miss_count;
     size_t eviction_count;
@@ -39,7 +41,7 @@ ModuleCache* module_cache_create(void)
         return NULL;
     }
 
-    pthread_rwlock_init(&cache->lock, NULL);
+    platform_rwlock_init(&cache->lock);
     cache->hit_count = 0;
     cache->miss_count = 0;
     cache->eviction_count = 0;
@@ -51,16 +53,16 @@ void module_cache_destroy(ModuleCache* cache)
 {
     if (!cache) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
 
     // Note: modules themselves are owned by module loader
     hash_map_destroy(cache->modules);
 
-    pthread_rwlock_unlock(&cache->lock);
-    pthread_rwlock_destroy(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
+    platform_rwlock_destroy(&cache->lock);
 
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
-    MEM_FREE(alloc, cache, sizeof(ModuleCache));
+    SLANG_MEM_FREE(alloc, cache, sizeof(ModuleCache));
 }
 
 // Cache a module
@@ -68,9 +70,9 @@ void module_cache_put(ModuleCache* cache, const char* path, Module* module)
 {
     if (!cache || !path || !module) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
     hash_map_put(cache->modules, path, module);
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Get a module from cache
@@ -78,7 +80,7 @@ Module* module_cache_get(ModuleCache* cache, const char* path)
 {
     if (!cache || !path) return NULL;
 
-    pthread_rwlock_rdlock(&cache->lock);
+    platform_rwlock_rdlock(&cache->lock);
     Module* module = (Module*)hash_map_get(cache->modules, path);
 
     if (module)
@@ -92,7 +94,7 @@ Module* module_cache_get(ModuleCache* cache, const char* path)
         cache->miss_count++;
     }
 
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
     return module;
 }
 
@@ -101,10 +103,10 @@ void module_cache_remove(ModuleCache* cache, const char* path)
 {
     if (!cache || !path) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
     hash_map_remove(cache->modules, path);
     cache->eviction_count++;
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Clear all modules from cache
@@ -112,9 +114,9 @@ void module_cache_clear(ModuleCache* cache)
 {
     if (!cache) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
     hash_map_clear(cache->modules);
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Get cache statistics
@@ -122,12 +124,12 @@ void module_cache_get_stats(ModuleCache* cache, ModuleCacheStats* stats)
 {
     if (!cache || !stats) return;
 
-    pthread_rwlock_rdlock(&cache->lock);
+    platform_rwlock_rdlock(&cache->lock);
     stats->hit_count = cache->hit_count;
     stats->miss_count = cache->miss_count;
     stats->eviction_count = cache->eviction_count;
     stats->size = hash_map_size(cache->modules);
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Preload modules into cache
@@ -135,7 +137,7 @@ void module_cache_preload(ModuleCache* cache, Module** modules, size_t count)
 {
     if (!cache || !modules || count == 0) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
     for (size_t i = 0; i < count; i++)
     {
         if (modules[i] && modules[i]->path)
@@ -143,7 +145,7 @@ void module_cache_preload(ModuleCache* cache, Module** modules, size_t count)
             hash_map_put(cache->modules, modules[i]->path, modules[i]);
         }
     }
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Helper struct for LRU tracking
@@ -188,7 +190,7 @@ static void collect_for_lru(const char* key, void* value, void* user_data)
         if (new_modules)
         {
             memcpy(new_modules, ctx->modules, old_size);
-            MEM_FREE(alloc, ctx->modules, old_size);
+            SLANG_MEM_FREE(alloc, ctx->modules, old_size);
             ctx->modules = new_modules;
         }
     }
@@ -204,12 +206,12 @@ void module_cache_trim(ModuleCache* cache, size_t max_size)
 {
     if (!cache) return;
 
-    pthread_rwlock_wrlock(&cache->lock);
+    platform_rwlock_wrlock(&cache->lock);
 
     size_t current_size = hash_map_size(cache->modules);
     if (current_size <= max_size)
     {
-        pthread_rwlock_unlock(&cache->lock);
+        platform_rwlock_unlock(&cache->lock);
         return;
     }
 
@@ -223,7 +225,7 @@ void module_cache_trim(ModuleCache* cache, size_t max_size)
 
     if (!ctx.modules)
     {
-        pthread_rwlock_unlock(&cache->lock);
+        platform_rwlock_unlock(&cache->lock);
         return;
     }
 
@@ -247,8 +249,8 @@ void module_cache_trim(ModuleCache* cache, size_t max_size)
         }
     }
 
-    MEM_FREE(alloc, ctx.modules, ctx.capacity * sizeof(ModuleAccessInfo));
-    pthread_rwlock_unlock(&cache->lock);
+    SLANG_MEM_FREE(alloc, ctx.modules, ctx.capacity * sizeof(ModuleAccessInfo));
+    platform_rwlock_unlock(&cache->lock);
 }
 
 // Iterator callback context
@@ -270,7 +272,7 @@ void module_cache_iterate(ModuleCache* cache, ModuleCacheIterator iterator, void
 {
     if (!cache || !iterator) return;
 
-    pthread_rwlock_rdlock(&cache->lock);
+    platform_rwlock_rdlock(&cache->lock);
 
     IteratorContext ctx = {
         .iterator = iterator,
@@ -279,5 +281,5 @@ void module_cache_iterate(ModuleCache* cache, ModuleCacheIterator iterator, void
 
     hash_map_iterate(cache->modules, hash_map_iterator_callback, &ctx);
 
-    pthread_rwlock_unlock(&cache->lock);
+    platform_rwlock_unlock(&cache->lock);
 }

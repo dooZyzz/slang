@@ -19,7 +19,7 @@ static void parser_free_string(char* str)
 {
     if (str) {
         Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-        MEM_FREE(alloc, str, strlen(str) + 1);
+        SLANG_MEM_FREE(alloc, str, strlen(str) + 1);
     }
 }
 
@@ -49,7 +49,7 @@ void parser_destroy(Parser* parser)
     {
         lexer_destroy(parser->lexer);
         Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-        MEM_FREE(alloc, parser, sizeof(Parser));
+        SLANG_MEM_FREE(alloc, parser, sizeof(Parser));
     }
 }
 
@@ -66,19 +66,19 @@ static void advance(Parser* parser)
     }
 }
 
-static bool check(Parser* parser, TokenType type)
+static bool check(Parser* parser, SlangTokenType type)
 {
     return parser->current.type == type;
 }
 
-static bool match(Parser* parser, TokenType type)
+static bool match(Parser* parser, SlangTokenType type)
 {
     if (!check(parser, type)) return false;
     advance(parser);
     return true;
 }
 
-static void consume(Parser* parser, TokenType type, const char* message)
+static void consume(Parser* parser, SlangTokenType type, const char* message)
 {
     if (parser->current.type == type)
     {
@@ -239,7 +239,7 @@ static Expr* primary(Parser* parser)
                 ident[parser->previous.lexeme_length - 1] = '\0';
                 
                 expr = expr_create_variable(ident);
-                MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), ident, parser->previous.lexeme_length);
+                SLANG_MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), ident, parser->previous.lexeme_length);
             } else if (match(parser, TOKEN_IDENTIFIER)) {
                 // Simple identifier form (lexer now returns TOKEN_IDENTIFIER for $name)
                 expr = expr_create_variable(parser->previous.literal.string_value);
@@ -257,7 +257,7 @@ static Expr* primary(Parser* parser)
                     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                     Expr** new_expressions = MEM_ALLOC(alloc, expr_capacity * sizeof(Expr*));
                     memcpy(new_expressions, expressions, old_capacity * sizeof(Expr*));
-                    MEM_FREE(alloc, expressions, old_capacity * sizeof(Expr*));
+                    SLANG_MEM_FREE(alloc, expressions, old_capacity * sizeof(Expr*));
                     expressions = new_expressions;
                 }
                 expressions[expr_count++] = expr;
@@ -272,7 +272,7 @@ static Expr* primary(Parser* parser)
                     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                     char** new_parts = MEM_ALLOC(alloc, part_capacity * sizeof(char*));
                     memcpy(new_parts, parts, old_capacity * sizeof(char*));
-                    MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
+                    SLANG_MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
                     parts = new_parts;
                 }
                 parts[part_count++] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
@@ -285,7 +285,7 @@ static Expr* primary(Parser* parser)
                     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                     char** new_parts = MEM_ALLOC(alloc, part_capacity * sizeof(char*));
                     memcpy(new_parts, parts, old_capacity * sizeof(char*));
-                    MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
+                    SLANG_MEM_FREE(alloc, parts, old_capacity * sizeof(char*));
                     parts = new_parts;
                 }
                 parts[part_count++] = MEM_STRDUP(allocators_get(ALLOC_SYSTEM_PARSER), parser->previous.literal.string_value);
@@ -317,7 +317,7 @@ static Expr* primary(Parser* parser)
         memcpy(name, parser->previous.lexeme, parser->previous.lexeme_length);
         name[parser->previous.lexeme_length] = '\0';
         Expr* node = expr_create_variable(name);
-        MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), name, parser->previous.lexeme_length + 1);
+        SLANG_MEM_FREE(allocators_get(ALLOC_SYSTEM_PARSER), name, parser->previous.lexeme_length + 1);
         return node;
     }
 
@@ -345,7 +345,7 @@ static Expr* primary(Parser* parser)
                     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                     Expr** new_elements = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
                     memcpy(new_elements, elements, old_capacity * sizeof(Expr*));
-                    MEM_FREE(alloc, elements, old_capacity * sizeof(Expr*));
+                    SLANG_MEM_FREE(alloc, elements, old_capacity * sizeof(Expr*));
                     elements = new_elements;
                 }
                 elements[count++] = expression(parser);
@@ -420,8 +420,8 @@ static Expr* primary(Parser* parser)
                         Expr** new_values = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
                         memcpy(new_keys, keys, old_capacity * sizeof(char*));
                         memcpy(new_values, values, old_capacity * sizeof(Expr*));
-                        MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
-                        MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
+                        SLANG_MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
+                        SLANG_MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
                         keys = new_keys;
                         values = new_values;
                     }
@@ -444,8 +444,8 @@ static Expr* primary(Parser* parser)
                             parser_free_string((char*)keys[i]);
                         }
                         Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-                        MEM_FREE(alloc, keys, capacity * sizeof(char*));
-                        MEM_FREE(alloc, values, capacity * sizeof(Expr*));
+                        SLANG_MEM_FREE(alloc, keys, capacity * sizeof(char*));
+                        SLANG_MEM_FREE(alloc, values, capacity * sizeof(Expr*));
                         return NULL;
                     }
                     
@@ -484,8 +484,8 @@ static Expr* primary(Parser* parser)
                         if (!match(parser, TOKEN_IDENTIFIER)) {
                             parser_error_at_current(parser, "Expect parameter name.");
                             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-                            MEM_FREE(alloc, param_names, param_capacity * sizeof(char*));
-                            MEM_FREE(alloc, param_types, param_capacity * sizeof(TypeExpr*));
+                            SLANG_MEM_FREE(alloc, param_names, param_capacity * sizeof(char*));
+                            SLANG_MEM_FREE(alloc, param_types, param_capacity * sizeof(TypeExpr*));
                             return NULL;
                         }
                         
@@ -497,8 +497,8 @@ static Expr* primary(Parser* parser)
                             TypeExpr** new_param_types = MEM_ALLOC(alloc, param_capacity * sizeof(TypeExpr*));
                             memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
                             memcpy(new_param_types, param_types, old_capacity * sizeof(TypeExpr*));
-                            MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
-                            MEM_FREE(alloc, param_types, old_capacity * sizeof(TypeExpr*));
+                            SLANG_MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                            SLANG_MEM_FREE(alloc, param_types, old_capacity * sizeof(TypeExpr*));
                             param_names = new_param_names;
                             param_types = new_param_types;
                         }
@@ -542,7 +542,7 @@ static Expr* primary(Parser* parser)
                                     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                                     Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
                                     memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
-                                    MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                                    SLANG_MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
                                     statements = new_statements;
                                 }
                                 statements[stmt_count++] = statement(parser);
@@ -600,7 +600,7 @@ static Expr* primary(Parser* parser)
                             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                             Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
                             memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
-                            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                            SLANG_MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
                             statements = new_statements;
                         }
                         statements[stmt_count++] = statement(parser);
@@ -628,7 +628,7 @@ static Expr* primary(Parser* parser)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 Stmt** new_statements = MEM_ALLOC(alloc, stmt_capacity * sizeof(Stmt*));
                 memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
-                MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+                SLANG_MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
                 statements = new_statements;
             }
             statements[stmt_count++] = statement(parser);
@@ -685,8 +685,8 @@ static Expr* parse_object_literal(Parser* parser)
                 parser_free_string((char*)keys[i]);
             }
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-            MEM_FREE(alloc, keys, capacity * sizeof(char*));
-            MEM_FREE(alloc, values, capacity * sizeof(Expr*));
+            SLANG_MEM_FREE(alloc, keys, capacity * sizeof(char*));
+            SLANG_MEM_FREE(alloc, values, capacity * sizeof(Expr*));
             return NULL;
         }
         
@@ -700,8 +700,8 @@ static Expr* parse_object_literal(Parser* parser)
             Expr** new_values = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
             memcpy(new_keys, keys, old_capacity * sizeof(char*));
             memcpy(new_values, values, old_capacity * sizeof(Expr*));
-            MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
-            MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
+            SLANG_MEM_FREE(alloc, keys, old_capacity * sizeof(char*));
+            SLANG_MEM_FREE(alloc, values, old_capacity * sizeof(Expr*));
             keys = new_keys;
             values = new_values;
         }
@@ -733,7 +733,7 @@ static Expr* finish_call(Parser* parser, Expr* callee)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 Expr** new_arguments = MEM_ALLOC(alloc, capacity * sizeof(Expr*));
                 memcpy(new_arguments, arguments, old_capacity * sizeof(Expr*));
-                MEM_FREE(alloc, arguments, old_capacity * sizeof(Expr*));
+                SLANG_MEM_FREE(alloc, arguments, old_capacity * sizeof(Expr*));
                 arguments = new_arguments;
             }
             
@@ -1078,7 +1078,7 @@ static Stmt* block_statement(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_statements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
             statements = new_statements;
         }
         statements[count++] = declaration(parser);
@@ -1291,7 +1291,7 @@ static Stmt* class_declaration(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_members = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_members, members, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
             members = new_members;
         }
 
@@ -1396,8 +1396,8 @@ static Stmt* function_declaration(Parser* parser)
                 const char** new_param_types = MEM_ALLOC(alloc, capacity * sizeof(char*));
                 memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
                 memcpy(new_param_types, param_types, old_capacity * sizeof(char*));
-                MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
-                MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
+                SLANG_MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                SLANG_MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
                 param_names = new_param_names;
                 param_types = new_param_types;
             }
@@ -1490,8 +1490,8 @@ static Stmt* function_declaration(Parser* parser)
         if (param_types[i]) parser_free_string((char*)param_types[i]);
     }
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-    MEM_FREE(alloc, param_names, capacity * sizeof(char*));
-    MEM_FREE(alloc, param_types, capacity * sizeof(char*));
+    SLANG_MEM_FREE(alloc, param_names, capacity * sizeof(char*));
+    SLANG_MEM_FREE(alloc, param_types, capacity * sizeof(char*));
     if (return_type) parser_free_string(return_type);
 
     return stmt;
@@ -1523,7 +1523,7 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             char* new_path = MEM_ALLOC(alloc, capacity);
             memcpy(new_path, path, path_len);
-            MEM_FREE(alloc, path, old_capacity);
+            SLANG_MEM_FREE(alloc, path, old_capacity);
             path = new_path;
         }
         memcpy(path + path_len, parser->previous.lexeme, part_len);
@@ -1537,7 +1537,7 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 char* new_path = MEM_ALLOC(alloc, capacity);
                 memcpy(new_path, path, path_len);
-                MEM_FREE(alloc, path, old_capacity);
+                SLANG_MEM_FREE(alloc, path, old_capacity);
                 path = new_path;
             }
             path[path_len++] = '/';
@@ -1550,7 +1550,7 @@ static char* parse_import_path(Parser* parser, bool* is_local, bool* is_native)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 char* new_path = MEM_ALLOC(alloc, capacity);
                 memcpy(new_path, path, path_len);
-                MEM_FREE(alloc, path, old_capacity);
+                SLANG_MEM_FREE(alloc, path, old_capacity);
                 path = new_path;
             }
             memcpy(path + path_len, parser->previous.lexeme, part_len);
@@ -1598,7 +1598,7 @@ static char* parse_module_path(Parser* parser)
         Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
         char* new_path = MEM_ALLOC(alloc, capacity);
         memcpy(new_path, path, path_len);
-        MEM_FREE(alloc, path, old_capacity);
+        SLANG_MEM_FREE(alloc, path, old_capacity);
         path = new_path;
     }
     memcpy(path, parser->previous.lexeme, parser->previous.lexeme_length);
@@ -1618,7 +1618,7 @@ static char* parse_module_path(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             char* new_path = MEM_ALLOC(alloc, capacity);
             memcpy(new_path, path, path_len);
-            MEM_FREE(alloc, path, old_capacity);
+            SLANG_MEM_FREE(alloc, path, old_capacity);
             path = new_path;
         }
         
@@ -1659,7 +1659,7 @@ static Stmt* import_declaration(Parser* parser)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 ImportSpecifier* new_specifiers = MEM_ALLOC(alloc, capacity * sizeof(ImportSpecifier));
                 memcpy(new_specifiers, specifiers, old_capacity * sizeof(ImportSpecifier));
-                MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
+                SLANG_MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
                 specifiers = new_specifiers;
             }
             
@@ -1797,7 +1797,7 @@ static Stmt* export_declaration(Parser* parser)
             stmt = stmt_create_export(EXPORT_DEFAULT);
             stmt->export_decl.default_export.name = func_stmt->function.name;
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-            MEM_FREE(alloc, func_stmt, sizeof(Stmt));
+            SLANG_MEM_FREE(alloc, func_stmt, sizeof(Stmt));
         }
         else
         {
@@ -1836,7 +1836,7 @@ static Stmt* export_declaration(Parser* parser)
                 Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
                 ImportSpecifier* new_specifiers = MEM_ALLOC(alloc, capacity * sizeof(ImportSpecifier));
                 memcpy(new_specifiers, specifiers, old_capacity * sizeof(ImportSpecifier));
-                MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
+                SLANG_MEM_FREE(alloc, specifiers, old_capacity * sizeof(ImportSpecifier));
                 specifiers = new_specifiers;
             }
             
@@ -1927,7 +1927,7 @@ static Stmt* module_declaration(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Decl** new_declarations = MEM_ALLOC(alloc, capacity * sizeof(Decl*));
             memcpy(new_declarations, declarations, old_capacity * sizeof(Decl*));
-            MEM_FREE(alloc, declarations, old_capacity * sizeof(Decl*));
+            SLANG_MEM_FREE(alloc, declarations, old_capacity * sizeof(Decl*));
             declarations = new_declarations;
         }
         
@@ -1950,7 +1950,7 @@ static Stmt* module_declaration(Parser* parser)
             }
             declarations[count++] = decl;
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-            MEM_FREE(alloc, stmt, sizeof(Stmt));
+            SLANG_MEM_FREE(alloc, stmt, sizeof(Stmt));
         }
         
         if (parser->panic_mode)
@@ -1994,7 +1994,7 @@ static Stmt* struct_declaration(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_members = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_members, members, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, members, old_capacity * sizeof(Stmt*));
             members = new_members;
         }
         
@@ -2044,7 +2044,7 @@ static Stmt* protocol_declaration(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_requirements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_requirements, requirements, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, requirements, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, requirements, old_capacity * sizeof(Stmt*));
             requirements = new_requirements;
         }
         
@@ -2078,8 +2078,8 @@ static Stmt* protocol_declaration(Parser* parser)
                         const char** new_param_types = MEM_ALLOC(alloc, param_capacity * sizeof(char*));
                         memcpy(new_param_names, param_names, old_capacity * sizeof(char*));
                         memcpy(new_param_types, param_types, old_capacity * sizeof(char*));
-                        MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
-                        MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
+                        SLANG_MEM_FREE(alloc, param_names, old_capacity * sizeof(char*));
+                        SLANG_MEM_FREE(alloc, param_types, old_capacity * sizeof(char*));
                         param_names = new_param_names;
                         param_types = new_param_types;
                     }
@@ -2159,7 +2159,7 @@ static Stmt* protocol_declaration(Parser* parser)
     
     parser_free_string(name);
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-    MEM_FREE(alloc, requirements, capacity * sizeof(Stmt*));
+    SLANG_MEM_FREE(alloc, requirements, capacity * sizeof(Stmt*));
     
     return stmt;
 }
@@ -2197,7 +2197,7 @@ static Stmt* extension_declaration(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_methods = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_methods, methods, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, methods, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, methods, old_capacity * sizeof(Stmt*));
             methods = new_methods;
         }
         
@@ -2314,7 +2314,7 @@ ProgramNode* parser_parse_program(Parser* parser)
             Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
             Stmt** new_statements = MEM_ALLOC(alloc, capacity * sizeof(Stmt*));
             memcpy(new_statements, statements, old_capacity * sizeof(Stmt*));
-            MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
+            SLANG_MEM_FREE(alloc, statements, old_capacity * sizeof(Stmt*));
             statements = new_statements;
         }
 

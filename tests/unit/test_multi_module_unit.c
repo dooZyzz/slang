@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <string.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <stdlib.h>
 #include "utils/test_framework.h"
 #include "utils/test_macros.h"

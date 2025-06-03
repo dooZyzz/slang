@@ -47,8 +47,13 @@ typedef struct Compiler {
     bool is_last_expr_stmt;
     ProgramNode* program;
     size_t current_stmt_index;
+    
+    // Module context
+    struct Module* current_module;
+    bool is_module_compilation;
 } Compiler;
 
 bool compile(ProgramNode* program, Chunk* chunk);
+bool compile_module(ProgramNode* program, Chunk* chunk, struct Module* module);
 
 #endif

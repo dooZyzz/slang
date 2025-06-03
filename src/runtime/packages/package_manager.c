@@ -4,12 +4,15 @@
 #include "runtime/modules/formats/module_archive.h"
 #include "runtime/modules/formats/module_bundle.h"
 #include "utils/compiler_wrapper.h"
+#include "utils/platform_compat.h"
+#include "utils/platform_dir.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <dirent.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <limits.h>
 #include <errno.h>
 
@@ -525,37 +528,39 @@ char* package_manager_resolve_module(PackageManager* pm, const char* module_name
                      spec->package, spec->version ? spec->version : "*");
             
             // Simple version matching for now
-            DIR* dir = opendir(pm->cache->local_cache_dir);
+            platform_dir_t* dir = platform_opendir(pm->cache->local_cache_dir);
             if (dir) {
-                struct dirent* entry;
-                while ((entry = readdir(dir)) != NULL) {
-                    if (strstr(entry->d_name, spec->package) &&
-                        strstr(entry->d_name, ".swiftmodule")) {
+                platform_dirent_t entry;
+                while (platform_readdir(dir, &entry)) {
+                    const char* entry_name = entry.name;
+                    if (strstr(entry_name, spec->package) &&
+                        strstr(entry_name, ".swiftmodule")) {
                         resolved_path = malloc(PATH_MAX);
                         snprintf(resolved_path, PATH_MAX, "%s%s%s",
-                                 pm->cache->local_cache_dir, PATH_SEPARATOR, entry->d_name);
+                                 pm->cache->local_cache_dir, PATH_SEPARATOR, entry_name);
                         break;
                     }
                 }
-                closedir(dir);
+                platform_closedir(dir);
             }
         }
         
         // If not found, check global cache
         if (!resolved_path && pm->cache->global_cache_dir) {
-            DIR* dir = opendir(pm->cache->global_cache_dir);
+            platform_dir_t* dir = platform_opendir(pm->cache->global_cache_dir);
             if (dir) {
-                struct dirent* entry;
-                while ((entry = readdir(dir)) != NULL) {
-                    if (strstr(entry->d_name, spec->package) &&
-                        strstr(entry->d_name, ".swiftmodule")) {
+                platform_dirent_t entry;
+                while (platform_readdir(dir, &entry)) {
+                    const char* entry_name = entry.name;
+                    if (strstr(entry_name, spec->package) &&
+                        strstr(entry_name, ".swiftmodule")) {
                         resolved_path = malloc(PATH_MAX);
                         snprintf(resolved_path, PATH_MAX, "%s%s%s",
-                                 pm->cache->global_cache_dir, PATH_SEPARATOR, entry->d_name);
+                                 pm->cache->global_cache_dir, PATH_SEPARATOR, entry_name);
                         break;
                     }
                 }
-                closedir(dir);
+                platform_closedir(dir);
             }
         }
     }

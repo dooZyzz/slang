@@ -1,13 +1,52 @@
-#include <time.h>
+// Native time module for SwiftLang
 #include <stdio.h>
-#include <stdlib.h>
+#include <time.h>
 #include <string.h>
-#include <sys/time.h>  // For gettimeofday on macOS
-#include "runtime/core/vm.h"
-#include "runtime/core/object.h"
-#include "runtime/modules/loader/module_loader.h"
+#include <stdbool.h>
+#include <unistd.h>
 
-// Native function to get current timestamp
+// SwiftLang's actual value types from vm.h
+typedef enum {
+    VAL_BOOL,
+    VAL_NIL,
+    VAL_NUMBER,
+    VAL_STRING,
+    VAL_OBJECT,
+    VAL_FUNCTION,
+    VAL_CLOSURE,
+    VAL_NATIVE,
+    VAL_STRUCT,
+    VAL_MODULE
+} ValueType;
+
+typedef union {
+    bool boolean;
+    double number;
+    char* string;
+    void* object;
+    void* function;
+    void* closure;
+    void* native;
+    void* module;
+} Value;
+
+typedef struct {
+    ValueType type;
+    Value as;
+} TaggedValue;
+
+// Value creation macros
+#define NUMBER_VAL(value) ((TaggedValue){VAL_NUMBER, {.number = value}})
+#define STRING_VAL(value) ((TaggedValue){VAL_STRING, {.string = value}})
+#define NATIVE_VAL(value) ((TaggedValue){VAL_NATIVE, {.native = value}})
+
+// Forward declaration
+typedef struct Module Module;
+
+// Module export function declaration
+extern void module_export(Module* module, const char* name, TaggedValue value);
+
+// Native function: get current time as number
 static TaggedValue native_time_now(int arg_count, TaggedValue* args) {
     (void)arg_count;
     (void)args;
@@ -16,79 +55,42 @@ static TaggedValue native_time_now(int arg_count, TaggedValue* args) {
     return NUMBER_VAL((double)current_time);
 }
 
-// Native function to format timestamp
+// Native function: get formatted time string
 static TaggedValue native_time_format(int arg_count, TaggedValue* args) {
-    if (arg_count < 1 || !IS_NUMBER(args[0])) {
-        return STRING_VAL(strdup("Invalid timestamp"));
-    }
-    
-    time_t timestamp = (time_t)AS_NUMBER(args[0]);
-    char buffer[256];
-    
-    struct tm* timeinfo = localtime(&timestamp);
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
-    
-    return STRING_VAL(strdup(buffer));
-}
-
-// Native function to get milliseconds
-static TaggedValue native_time_millis(int arg_count, TaggedValue* args) {
     (void)arg_count;
     (void)args;
     
-#ifdef __APPLE__
-    // macOS doesn't have clock_gettime in older versions
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    double millis = tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    double millis = ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
-#endif
+    time_t current_time = time(NULL);
+    struct tm* time_info = localtime(&current_time);
     
-    return NUMBER_VAL(millis);
+    static char time_buffer[64];
+    strftime(time_buffer, sizeof(time_buffer), "%Y-%m-%d %H:%M:%S", time_info);
+    
+    return STRING_VAL(time_buffer);
 }
 
-// Native function to sleep for milliseconds
+// Native function: sleep for specified seconds
 static TaggedValue native_time_sleep(int arg_count, TaggedValue* args) {
-    if (arg_count < 1 || !IS_NUMBER(args[0])) {
-        return BOOL_VAL(false);
+    if (arg_count < 1 || args[0].type != VAL_NUMBER) {
+        return NUMBER_VAL(0.0); // Return 0 on error
     }
     
-    int millis = (int)AS_NUMBER(args[0]);
-    if (millis < 0) millis = 0;
+    int seconds = (int)args[0].as.number;
+    sleep(seconds);
     
-    struct timespec ts;
-    ts.tv_sec = millis / 1000;
-    ts.tv_nsec = (millis % 1000) * 1000000;
-    
-    nanosleep(&ts, NULL);
-    return BOOL_VAL(true);
+    return NUMBER_VAL((double)seconds);
 }
 
-// Module initialization function
-void time_module_init(VM* vm) {
-    // Create module object
-    Object* module = object_create();
+// Module initialization
+bool swiftlang_module_init(Module* module) {
+    printf("Native time module: Registering functions\n");
     
-    // Add native functions
-    object_set_property(module, "now", NATIVE_VAL(native_time_now));
-    object_set_property(module, "format", NATIVE_VAL(native_time_format));
-    object_set_property(module, "millis", NATIVE_VAL(native_time_millis));
-    object_set_property(module, "sleep", NATIVE_VAL(native_time_sleep));
-    
-    // Register the module
-    define_global(vm, "time_native", OBJECT_VAL(module));
-}
-
-// Module initialization function
-bool swiftlang_time_module_init(Module* module) {
     // Export native functions
-    module_export(module, "native_time_now", NATIVE_VAL(native_time_now));
-    module_export(module, "native_time_format", NATIVE_VAL(native_time_format));
-    module_export(module, "native_time_millis", NATIVE_VAL(native_time_millis));
-    module_export(module, "native_time_sleep", NATIVE_VAL(native_time_sleep));
+    module_export(module, "now", NATIVE_VAL(native_time_now));
+    module_export(module, "format", NATIVE_VAL(native_time_format));
+    module_export(module, "sleep", NATIVE_VAL(native_time_sleep));
+    
+    printf("Native time module: Exported 'now', 'format', and 'sleep' functions\n");
     
     return true;
 }

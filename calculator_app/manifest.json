@@ -1,0 +1,12 @@
+{
+  "name": "calculator",
+  "version": "1.0.0",
+  "description": "A modular calculator application",
+  "main": "main.swift",
+  "type": "application",
+  "sources": [
+    "math_ops.swift",
+    "display.swift",
+    "main.swift"
+  ]
+}

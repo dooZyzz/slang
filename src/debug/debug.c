@@ -146,6 +146,45 @@ int disassemble_instruction(Chunk* chunk, int offset) {
             return jump_instruction("OP_LOOP", -1, chunk, offset);
         case OP_CALL:
             return byte_instruction("OP_CALL", chunk, offset);
+        case OP_METHOD_CALL:
+            return byte_instruction("OP_METHOD_CALL", chunk, offset);
+        case OP_CLOSURE: {
+            offset++;
+            uint8_t constant = chunk->code[offset++];
+            printf("%-16s %4d ", "OP_CLOSURE", constant);
+            print_value(chunk->constants.values[constant]);
+            printf("\n");
+            
+            Function* function = AS_FUNCTION(chunk->constants.values[constant]);
+            for (int j = 0; j < function->upvalue_count; j++) {
+                int is_local = chunk->code[offset++];
+                int index = chunk->code[offset++];
+                printf("%04d      |                     %s %d\n",
+                       offset - 2, is_local ? "local" : "upvalue", index);
+            }
+            
+            return offset;
+        }
+        case OP_CLOSURE_LONG: {
+            offset++;
+            uint32_t constant = chunk->code[offset] << 16;
+            constant |= chunk->code[offset + 1] << 8;
+            constant |= chunk->code[offset + 2];
+            offset += 3;
+            printf("%-16s %4d ", "OP_CLOSURE_LONG", constant);
+            print_value(chunk->constants.values[constant]);
+            printf("\n");
+            
+            Function* function = AS_FUNCTION(chunk->constants.values[constant]);
+            for (int j = 0; j < function->upvalue_count; j++) {
+                int is_local = chunk->code[offset++];
+                int index = chunk->code[offset++];
+                printf("%04d      |                     %s %d\n",
+                       offset - 2, is_local ? "local" : "upvalue", index);
+            }
+            
+            return offset;
+        }
         case OP_RETURN:
             return simple_instruction("OP_RETURN", offset);
         case OP_LOAD_BUILTIN:
@@ -181,6 +220,8 @@ int disassemble_instruction(Chunk* chunk, int offset) {
             printf("]\n");
             return offset + 3 + field_count;
         }
+        case OP_CREATE_OBJECT:
+            return simple_instruction("OP_CREATE_OBJECT", offset);
         case OP_CREATE_STRUCT:
             return constant_instruction("OP_CREATE_STRUCT", chunk, offset);
         case OP_GET_FIELD:

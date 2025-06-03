@@ -16,6 +16,6 @@
 
 // Bytecode allocator macros
 #define BYTECODE_NEW(type) MEM_NEW(allocators_get(ALLOC_SYSTEM_BYTECODE), type)
-#define BYTECODE_FREE(ptr, size) MEM_FREE(allocators_get(ALLOC_SYSTEM_BYTECODE), ptr, size)
+#define BYTECODE_FREE(ptr, size) SLANG_MEM_FREE(allocators_get(ALLOC_SYSTEM_BYTECODE), ptr, size)
 
 #endif // MODULE_ALLOCATOR_MACROS_H

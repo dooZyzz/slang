@@ -41,7 +41,7 @@ HashMap* hash_map_create_with_allocator(Allocator* allocator) {
     map->size = 0;
     map->buckets = MEM_NEW_ARRAY(allocator, HashMapEntry*, map->capacity);
     if (!map->buckets) {
-        MEM_FREE(allocator, map, sizeof(HashMap));
+        SLANG_MEM_FREE(allocator, map, sizeof(HashMap));
         return NULL;
     }
     
@@ -65,14 +65,14 @@ void hash_map_destroy(HashMap* map) {
         HashMapEntry* entry = map->buckets[i];
         while (entry) {
             HashMapEntry* next = entry->next;
-            MEM_FREE(alloc, entry->key, strlen(entry->key) + 1);
-            MEM_FREE(alloc, entry, sizeof(HashMapEntry));
+            SLANG_MEM_FREE(alloc, entry->key, strlen(entry->key) + 1);
+            SLANG_MEM_FREE(alloc, entry, sizeof(HashMapEntry));
             entry = next;
         }
     }
     
-    MEM_FREE(alloc, map->buckets, sizeof(HashMapEntry*) * map->capacity);
-    MEM_FREE(alloc, map, sizeof(HashMap));
+    SLANG_MEM_FREE(alloc, map->buckets, sizeof(HashMapEntry*) * map->capacity);
+    SLANG_MEM_FREE(alloc, map, sizeof(HashMap));
 }
 
 static void resize(HashMap* map) {
@@ -107,7 +107,7 @@ static void resize(HashMap* map) {
     }
     
     // Free old bucket array
-    MEM_FREE(map->allocator, old_buckets, sizeof(HashMapEntry*) * old_capacity);
+    SLANG_MEM_FREE(map->allocator, old_buckets, sizeof(HashMapEntry*) * old_capacity);
 }
 
 void hash_map_put(HashMap* map, const char* key, void* value) {
@@ -137,7 +137,7 @@ void hash_map_put(HashMap* map, const char* key, void* value) {
     
     entry->key = MEM_STRDUP(map->allocator, key);
     if (!entry->key) {
-        MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
+        SLANG_MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
         return;
     }
     
@@ -174,8 +174,8 @@ void hash_map_remove(HashMap* map, const char* key) {
     while (entry) {
         if (strcmp(entry->key, key) == 0) {
             *prev = entry->next;
-            MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
-            MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
+            SLANG_MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
+            SLANG_MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
             map->size--;
             return;
         }
@@ -212,8 +212,8 @@ void hash_map_clear(HashMap* map) {
         HashMapEntry* entry = map->buckets[i];
         while (entry) {
             HashMapEntry* next = entry->next;
-            MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
-            MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
+            SLANG_MEM_FREE(map->allocator, entry->key, strlen(entry->key) + 1);
+            SLANG_MEM_FREE(map->allocator, entry, sizeof(HashMapEntry));
             entry = next;
         }
         map->buckets[i] = NULL;

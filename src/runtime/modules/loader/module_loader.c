@@ -30,23 +30,32 @@
  * circular dependencies through proper state management.
  */
 
+#include "runtime/core/vm.h"
 #include "runtime/modules/loader/module_loader.h"
 #include "utils/allocators.h"
+#include "utils/platform_compat.h"
+#include "utils/platform_dynlib.h"
+#include "runtime/modules/module_bundle.h"
 #include <string.h>
 #include <stdio.h>
-#include <dlfcn.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <limits.h>
 #include <sys/stat.h>
-#include <glob.h>
+#include "utils/platform_glob.h"
+#ifndef _WIN32
 #include <sys/time.h>
+#endif
 #include <time.h>
+#ifndef _WIN32
 #include <libgen.h>
+#endif
 #include <stdlib.h>
+#include "utils/memory.h"
 #include "lexer/lexer.h"
 #include "parser/parser.h"
 #include "codegen/compiler.h"
-#include "runtime/core/vm.h"
 #include "ast/ast.h"
 #include "runtime/modules/lifecycle/builtin_modules.h"
 #include "debug/debug.h"
@@ -66,6 +75,7 @@
 // Constants
 #define MODULE_NAME_BUFFER_SIZE 512
 #define MODULE_PATH_BUFFER_SIZE 1024
+#define MODULE_LARGE_PATH_BUFFER_SIZE 8192
 
 // Forward declarations
 bool ensure_module_initialized(Module* module, VM* vm);
@@ -210,25 +220,57 @@ bool module_has_in_scope(Module* module, const char* name) {
 }
 
 /**
- * Load a module from a compiled .swiftmodule archive.
+ * Load a module from a compiled .swiftmodule bundle using the unified bundle system.
  * 
- * This function handles the complete process of loading a module from a ZIP archive:
- * 1. Opens the archive and extracts metadata (module.json)
- * 2. Deserializes the bytecode for the module
- * 3. Executes the module bytecode in a separate VM instance
+ * This function handles the complete process of loading a module from a bundle:
+ * 1. Loads the bundle using the unified module bundle system
+ * 2. Extracts metadata and validates the bundle
+ * 3. Loads and executes bytecode modules
  * 4. Extracts exported symbols from the module object
  * 5. Returns a fully initialized Module structure
  * 
  * @param loader The module loader instance
- * @param archive_path Path to the .swiftmodule archive file
+ * @param archive_path Path to the .swiftmodule bundle file
  * @param module_name Name of the module being loaded
  * @return Initialized Module* on success, or Module with error state on failure
  */
-static Module* module_load_from_archive(ModuleLoader* loader, const char* archive_path, const char* module_name) {
-    MODULE_DEBUG("module_load_from_archive called: archive=%s, module=%s\n", archive_path, module_name);
+static Module* module_load_from_bundle(ModuleLoader* loader, const char* archive_path, const char* module_name) {
+    MODULE_DEBUG("module_load_from_bundle called: archive=%s, module=%s\n", archive_path, module_name);
     
     Allocator* alloc = allocators_get(ALLOC_SYSTEM_MODULES);
     Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
+    
+    // Extract actual module name from path if needed
+    char extracted_module_name[MODULE_NAME_BUFFER_SIZE];
+    const char* actual_module_name = module_name;
+    
+    // Check if module_name looks like a path
+    if (strchr(module_name, '/') || strstr(module_name, ".swiftmodule")) {
+        // Extract basename
+        const char* base = strrchr(module_name, '/');
+        if (base) {
+            base++;
+        } else {
+            base = module_name;
+        }
+        
+        // Copy and remove .swiftmodule extension
+        strncpy(extracted_module_name, base, sizeof(extracted_module_name) - 1);
+        extracted_module_name[sizeof(extracted_module_name) - 1] = '\0';
+        char* dot = strstr(extracted_module_name, ".swiftmodule");
+        if (dot) {
+            *dot = '\0';
+        }
+        actual_module_name = extracted_module_name;
+        MODULE_DEBUG("Extracted module name: %s\n", actual_module_name);
+    }
+    
+    // Load bundle using unified system
+    ModuleBundle* bundle = module_bundle_load(archive_path);
+    if (!bundle) {
+        fprintf(stderr, "Failed to load module bundle: %s\n", archive_path);
+        return NULL;
+    }
     
     // Create module
     Module* module = MODULES_NEW_ZERO(Module);
@@ -237,8 +279,9 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     module->state = MODULE_STATE_LOADING;
     module->is_native = false;
     module->ref_count = 0;
-    pthread_mutex_init(&module->ref_mutex, NULL);
+    platform_mutex_init(&module->ref_mutex);
     module->last_access_time = time(NULL);
+    module->bundle = bundle; // Store bundle reference
     
     // Track load start
     module_track_load_start(module);
@@ -252,69 +295,24 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     // Create module object
     module->module_object = object_create();
     
-    // Open the archive
-    ModuleArchive* archive = module_archive_open(archive_path);
-    if (!archive) {
-        fprintf(stderr, "Failed to open module archive: %s\n", archive_path);
-        module->state = MODULE_STATE_ERROR;
-        return module;
+    // Extract version from bundle metadata
+    if (bundle->metadata && bundle->metadata->version) {
+        module->version = STRINGS_STRDUP(bundle->metadata->version);
+        MODULE_DEBUG("Module version: %s\n", module->version);
     }
     
-    // Read module metadata from JSON
-    char* json_content = NULL;
-    size_t json_size = 0;
-    
-    if (!module_archive_extract_json(archive, &json_content, &json_size)) {
-        fprintf(stderr, "Failed to extract module.json from archive\n");
-        module_archive_destroy(archive);
-        module->state = MODULE_STATE_ERROR;
-        return module;
-    }
-    
-    // Parse version from JSON
-    const char* version_start = strstr(json_content, "\"version\"");
-    if (version_start) {
-        version_start = strchr(version_start, ':');
-        if (version_start) {
-            version_start++; // Skip :
-            // Skip whitespace
-            while (*version_start && (*version_start == ' ' || *version_start == '\t')) {
-                version_start++;
-            }
-            if (*version_start == '"') {
-                version_start++; // Skip opening quote
-                const char* version_end = strchr(version_start, '"');
-                if (version_end) {
-                    size_t version_len = version_end - version_start;
-                    char* version = STRINGS_ALLOC(version_len + 1);
-                    strncpy(version, version_start, version_len);
-                    version[version_len] = '\0';
-                    module->version = version;
-                    MODULE_DEBUG("Module version: %s\n", module->version);
-                }
-            }
-        }
-    }
-    
-    // Free json_content using string allocator
-    STRINGS_FREE(json_content, json_size + 1);
-    
-    // Find the main module bytecode (usually named after the package)
-    uint8_t* bytecode = NULL;
+    // Extract bytecode from bundle
     size_t bytecode_size = 0;
-    
-    // Try with swift. prefix first
-    char bytecode_name[MODULE_NAME_BUFFER_SIZE];
-    snprintf(bytecode_name, sizeof(bytecode_name), "swift.%s", module_name);
-    MODULE_DEBUG("Looking for bytecode: %s\n", bytecode_name);
-    
-    if (!module_archive_extract_bytecode(archive, bytecode_name, &bytecode, &bytecode_size)) {
-        MODULE_DEBUG("Failed with swift prefix, trying without\n");
+    uint8_t* bytecode = module_bundle_get_bytecode(bundle, actual_module_name, &bytecode_size);
+    if (!bytecode) {
+        // Try with swift. prefix
+        char bytecode_name[MODULE_NAME_BUFFER_SIZE];
+        snprintf(bytecode_name, sizeof(bytecode_name), "swift.%s", actual_module_name);
+        bytecode = module_bundle_get_bytecode(bundle, bytecode_name, &bytecode_size);
         
-        // Try without the swift. prefix
-        if (!module_archive_extract_bytecode(archive, module_name, &bytecode, &bytecode_size)) {
-            fprintf(stderr, "Failed to extract module bytecode: %s\n", module_name);
-            module_archive_destroy(archive);
+        if (!bytecode) {
+            fprintf(stderr, "Failed to extract module bytecode: %s\n", actual_module_name);
+            module_bundle_release(bundle);
             module->state = MODULE_STATE_ERROR;
             return module;
         }
@@ -334,7 +332,7 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
         MODULES_FREE(bytecode, bytecode_size);
         chunk_free(chunk);
         BYTECODE_FREE(chunk, sizeof(Chunk));
-        module_archive_destroy(archive);
+        module_bundle_release(bundle);
         module->state = MODULE_STATE_ERROR;
         return module;
     }
@@ -369,7 +367,6 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     if (lazy_loading) {
         MODULE_DEBUG("Lazy loading enabled for module: %s\n", module_name);
         module->state = MODULE_STATE_UNLOADED;
-        module_archive_destroy(archive);
         return module;
     }
     
@@ -483,7 +480,6 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
     // Clean up
     chunk_free(chunk);
     BYTECODE_FREE(chunk, sizeof(Chunk));
-    module_archive_destroy(archive);
     
     return module;
 }
@@ -493,8 +489,24 @@ static Module* module_load_from_archive(ModuleLoader* loader, const char* archiv
  * This function executes the module's bytecode if it hasn't been executed yet.
  */
 bool ensure_module_initialized(Module* module, VM* vm) {
-    if (!module || module->state == MODULE_STATE_LOADED || module->state == MODULE_STATE_ERROR) {
-        return module && module->state == MODULE_STATE_LOADED;
+    if (!module) return false;
+    
+    if (module->state == MODULE_STATE_ERROR) {
+        return false;
+    }
+    
+    if (module->state == MODULE_STATE_LOADED) {
+        // Ensure module object is populated with exports
+        if (module->module_object && module->exports.count > 0) {
+            for (size_t i = 0; i < module->exports.count; i++) {
+                if (module->exports.visibility[i]) {  // Only add public exports
+                    object_set_property(module->module_object, 
+                                      module->exports.names[i], 
+                                      module->exports.values[i]);
+                }
+            }
+        }
+        return true;
     }
     
     if (module->state == MODULE_STATE_LOADING) {
@@ -604,7 +616,7 @@ bool ensure_module_initialized(Module* module, VM* vm) {
     return false;
 }
 
-static char* resolve_module_path(ModuleLoader* loader, const char* path, const char* relative_to) {
+static char* resolve_module_path(ModuleLoader* loader, const char* path, const char* relative_to, bool is_native) {
     Allocator* str_alloc = allocators_get(ALLOC_SYSTEM_STRINGS);
     
     // First, try to resolve through package system
@@ -699,25 +711,22 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
         return NULL;
     }
     
-    // Handle native imports with $ prefix
-    if (path[0] == '$') {
-        // Native import - return the module name without $
-        // The module loading system will handle finding the native module
-        return STRINGS_STRDUP(path + 1);  // Skip $ and return just the module name
-    }
+    // Native imports with $ prefix are handled by the general search path logic below
     
     // If path is absolute, use it directly
     if (path[0] == '/') {
         return STRINGS_STRDUP(path);
     }
     
-    char buffer[PATH_MAX];
+    char buffer[MODULE_LARGE_PATH_BUFFER_SIZE];
     char converted_path[PATH_MAX];
     
-    // Handle @module syntax for local modules
+    // Handle @module and $module syntax for local and native modules
     const char* search_path = path;
     if (path[0] == '@') {
         search_path = path + 1; // Skip the @ prefix
+    } else if (path[0] == '$') {
+        search_path = path + 1; // Skip the $ prefix
     }
     
     // Convert dotted path to file path (e.g., sys.native.io -> sys/native/io)
@@ -731,8 +740,8 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
     }
     converted_path[j] = '\0';
     
-    // Native modules are determined by the is_native flag, not the path
-    bool is_native = false;
+    // Native modules are determined by the is_native flag passed as parameter
+    // No need to redeclare is_native here
     
     // If path starts with './' or '../', resolve relative to the importing file
     if ((path[0] == '.' && path[1] == '/') || 
@@ -764,18 +773,35 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
     }
     
     // Try each search path
+    fprintf(stderr, "DEBUG: Entering search paths loop, count=%zu, is_native=%d\n", loader->search_paths.count, is_native);
     for (size_t i = 0; i < loader->search_paths.count; i++) {
         // For native modules, look in the native subdirectory
         if (is_native) {
-            // Extract module name after sys.native.
-            const char* native_name = path + 11;
+            // Extract module name after $ prefix
+            const char* native_name = (path[0] == '$') ? path + 1 : path;
+            fprintf(stderr, "DEBUG: Searching for native module '%s' in path[%zu]: %s\n", native_name, i, loader->search_paths.paths[i]);
             
+            // Try in native subdirectory first
             #ifdef __APPLE__
             snprintf(buffer, sizeof(buffer), "%s/native/%s.dylib", loader->search_paths.paths[i], native_name);
             #else
             snprintf(buffer, sizeof(buffer), "%s/native/%s.so", loader->search_paths.paths[i], native_name);
             #endif
+            fprintf(stderr, "DEBUG: Checking: %s\n", buffer);
             if (access(buffer, F_OK) == 0) {
+                fprintf(stderr, "DEBUG: Found native module at: %s\n", buffer);
+                return STRINGS_STRDUP(buffer);
+            }
+            
+            // Try directly in search path (for development/testing)
+            #ifdef __APPLE__
+            snprintf(buffer, sizeof(buffer), "%s/%s.dylib", loader->search_paths.paths[i], native_name);
+            #else
+            snprintf(buffer, sizeof(buffer), "%s/%s.so", loader->search_paths.paths[i], native_name);
+            #endif
+            fprintf(stderr, "DEBUG: Checking: %s\n", buffer);
+            if (access(buffer, F_OK) == 0) {
+                fprintf(stderr, "DEBUG: Found native module at: %s\n", buffer);
                 return STRINGS_STRDUP(buffer);
             }
         }
@@ -814,7 +840,9 @@ static char* resolve_module_path(ModuleLoader* loader, const char* path, const c
     
     // Also check current directory for .swiftmodule
     snprintf(buffer, sizeof(buffer), "%s.swiftmodule", path);
+    fprintf(stderr, "DEBUG: Checking for .swiftmodule: %s\n", buffer);
     if (access(buffer, F_OK) == 0) {
+        fprintf(stderr, "DEBUG: Found .swiftmodule, returning: %s\n", buffer);
         return STRINGS_STRDUP(buffer);
     }
     
@@ -978,7 +1006,7 @@ static bool load_compiled_module(ModuleLoader* loader, Module* module, ModuleMet
         const char* platform = module_archive_get_platform();
         
         if (module_archive_extract_native_lib(archive, platform, temp_lib_path)) {
-            module->native_handle = dlopen(temp_lib_path, RTLD_LAZY | RTLD_LOCAL);
+            module->native_handle = platform_dynlib_open(temp_lib_path);
             if (!module->native_handle) {
                 // Failed to load extracted native library
             } else {
@@ -1134,7 +1162,7 @@ Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata
     module->is_native = metadata->native.library != NULL;
     module->scope = module_scope_create();
     module->ref_count = 0;
-    pthread_mutex_init(&module->ref_mutex, NULL);
+    platform_mutex_init(&module->ref_mutex);
     module->last_access_time = time(NULL);
     
     // Initialize exports
@@ -1170,12 +1198,12 @@ Module* load_module_from_metadata(ModuleLoader* loader, ModuleMetadata* metadata
             case MODULE_EXPORT_FUNCTION:
                 if (exp->native_name && native_handle) {
                     // Look up native function
-                    void* sym = dlsym(native_handle, exp->native_name);
+                    void* sym = platform_dynlib_symbol(native_handle, exp->native_name);
                     if (sym) {
                         NativeFn fn = (NativeFn)sym;
                         module_export(module, exp->name, NATIVE_VAL(fn));
                     } else {
-                        const char* error = dlerror();
+                        const char* error = platform_dynlib_error();
                         fprintf(stderr, "Native function %s not found in library: %s\n", exp->native_name, error ? error : "unknown error");
                     }
                 }
@@ -1307,7 +1335,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             const char* archive_path = glob_result.gl_pathv[0];
             
             // Create a module that will load from archive
-            Module* module = module_load_from_archive(loader, archive_path, path);
+            Module* module = module_load_from_bundle(loader, archive_path, path);
             globfree(&glob_result);
             
             if (module) {
@@ -1328,7 +1356,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                 // Found in global cache - load from archive
                 const char* archive_path = glob_result.gl_pathv[0];
                 
-                Module* module = module_load_from_archive(loader, archive_path, path);
+                Module* module = module_load_from_bundle(loader, archive_path, path);
                 globfree(&glob_result);
                 
                 if (module) {
@@ -1341,7 +1369,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     }
     
     // Resolve module path
-    char* absolute_path = resolve_module_path(loader, path, relative_to);
+    char* absolute_path = resolve_module_path(loader, path, relative_to, is_native);
     if (!absolute_path) {
         fprintf(stderr, "Module not found: %s\n", path);
         return NULL;
@@ -1355,7 +1383,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     module->is_native = is_native;
     module->scope = module_scope_create();
     module->ref_count = 0;
-    pthread_mutex_init(&module->ref_mutex, NULL);
+    platform_mutex_init(&module->ref_mutex);
     module->last_access_time = time(NULL);
     
     // Initialize exports
@@ -1364,14 +1392,19 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
     module->exports.values = MODULES_NEW_ARRAY_ZERO(TaggedValue, module->exports.capacity);
     module->exports.visibility = MODULES_NEW_ARRAY_ZERO(uint8_t, module->exports.capacity);
     
+    // Create module object for exports
+    module->module_object = object_create();
+    
     // Cache the module early to handle circular dependencies
     cache_module(loader, module);
     
     if (is_native) {
         // Load native module directly
-        module->native_handle = dlopen(absolute_path, RTLD_LAZY);
+        fprintf(stderr, "DEBUG: Trying to load native module from: %s\n", absolute_path);
+        module->native_handle = platform_dynlib_open(absolute_path);
         if (!module->native_handle) {
-            fprintf(stderr, "Failed to load native module %s: %s\n", absolute_path, dlerror());
+            const char* error = platform_dynlib_error();
+            fprintf(stderr, "Failed to load native module %s: %s\n", absolute_path, error ? error : "unknown error");
             module->state = MODULE_STATE_ERROR;
             return NULL;
         }
@@ -1422,6 +1455,17 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         
         // Mark module as loaded
         module->state = MODULE_STATE_LOADED;
+        
+        // Populate module object with exports for native modules
+        if (module->module_object && module->exports.count > 0) {
+            for (size_t i = 0; i < module->exports.count; i++) {
+                if (module->exports.visibility[i]) {  // Only add public exports
+                    object_set_property(module->module_object, 
+                                      module->exports.names[i], 
+                                      module->exports.values[i]);
+                }
+            }
+        }
     }
     
     if (!is_native) {
@@ -1432,7 +1476,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             if (getenv("SWIFTLANG_DEBUG")) {
                 fprintf(stderr, "[DEBUG] Loading from .swiftmodule archive: %s\n", absolute_path);
             }
-            Module* loaded = module_load_from_archive(loader, absolute_path, path);
+            Module* loaded = module_load_from_bundle(loader, absolute_path, path);
             if (loaded) {
                 // Update the cached module with loaded data
                 module->exports = loaded->exports;
@@ -1504,7 +1548,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                         case MODULE_EXPORT_FUNCTION:
                             if (exp->native_name) {
                                 // Look up native function
-                                void* sym = dlsym(native_handle, exp->native_name);
+                                void* sym = platform_dynlib_symbol(native_handle, exp->native_name);
                                 if (sym) {
                                     NativeFn fn = (NativeFn)sym;
                                     // Define the native function as a global in the module VM
@@ -1518,7 +1562,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
                                         // fprintf(stderr, "[DEBUG] Defined native function global: %s\n", exp->name);
                                     }
                                 } else {
-                                    const char* error = dlerror();
+                                    const char* error = platform_dynlib_error();
                                     fprintf(stderr, "Native function %s not found in library: %s\n", 
                                             exp->native_name, error ? error : "unknown error");
                                 }
@@ -1593,7 +1637,7 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         }
         
         // Check for cached bytecode
-        char cache_path[PATH_MAX];
+        char cache_path[MODULE_LARGE_PATH_BUFFER_SIZE];
         const char* home = getenv("HOME");
         bool loaded_from_cache = false;
         Chunk* module_chunk = BYTECODE_NEW(Chunk);
@@ -1601,15 +1645,20 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
         
         if (home) {
             // Create cache directory if it doesn't exist
-            char cache_dir[PATH_MAX];
+            char cache_dir[MODULE_LARGE_PATH_BUFFER_SIZE];
             snprintf(cache_dir, sizeof(cache_dir), "%s/.swiftlang/cache", home);
             mkdir(cache_dir, 0755);
             
             // Generate cache filename based on module path and mtime
             char* path_copy = STRINGS_STRDUP(absolute_path);
             char* module_name = basename(path_copy);
-            snprintf(cache_path, sizeof(cache_path), "%s/%s-%ld.swiftbc", 
-                     cache_dir, module_name, file_stat_cache.st_mtime);
+            // Use safe string construction for cache path
+            int written = snprintf(cache_path, sizeof(cache_path), "%s/%s-%lld.swiftbc", 
+                                 cache_dir, module_name, (long long)file_stat_cache.st_mtime);
+            if (written >= (int)sizeof(cache_path)) {
+                fprintf(stderr, "Cache path too long, skipping cache\n");
+                goto skip_cache;
+            }
             size_t path_copy_len = strlen(path_copy) + 1;
             STRINGS_FREE(path_copy, path_copy_len);
             
@@ -1698,6 +1747,8 @@ Module* module_load_relative(ModuleLoader* loader, const char* path, bool is_nat
             parser_destroy(parser);
         }
         
+skip_cache:
+        ;  // Empty statement to fix C standard compliance
         // Execute the module to populate exports
         VM* vm = loader->vm;
         
@@ -1909,10 +1960,16 @@ void module_export(Module* module, const char* name, TaggedValue value) {
         memcpy(new_values, module->exports.values, old_capacity * sizeof(TaggedValue));
         MODULES_FREE(module->exports.values, old_capacity * sizeof(TaggedValue));
         module->exports.values = new_values;
+        
+        uint8_t* new_visibility = MODULES_NEW_ARRAY(uint8_t, module->exports.capacity);
+        memcpy(new_visibility, module->exports.visibility, old_capacity * sizeof(uint8_t));
+        MODULES_FREE(module->exports.visibility, old_capacity * sizeof(uint8_t));
+        module->exports.visibility = new_visibility;
     }
     
     module->exports.names[module->exports.count] = STRINGS_STRDUP(name);
     module->exports.values[module->exports.count] = value;
+    module->exports.visibility[module->exports.count] = 1; // Public by default
     module->exports.count++;
 }
 

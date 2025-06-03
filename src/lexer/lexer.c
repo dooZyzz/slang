@@ -11,7 +11,7 @@
 typedef struct
 {
     const char* keyword;
-    TokenType type;
+    SlangTokenType type;
 } Keyword;
 
 static const Keyword keywords[] = {
@@ -92,7 +92,7 @@ void lexer_destroy(Lexer* lexer)
 {
     if (lexer) {
         Allocator* alloc = allocators_get(ALLOC_SYSTEM_PARSER);
-        MEM_FREE(alloc, lexer, sizeof(Lexer));
+        SLANG_MEM_FREE(alloc, lexer, sizeof(Lexer));
     }
 }
 
@@ -199,7 +199,7 @@ static void skip_whitespace(Lexer* lexer)
     }
 }
 
-static Token make_token(Lexer* lexer, TokenType type, size_t start, size_t length)
+static Token make_token(Lexer* lexer, SlangTokenType type, size_t start, size_t length)
 {
     LOG_TRACE(LOG_MODULE_LEXER, "Creating token type %d at line %zu, col %zu", 
               type, lexer->line, start - lexer->line_start + 1);
@@ -642,6 +642,8 @@ Token lexer_next_token(Lexer* lexer)
         return make_token(lexer, TOKEN_DOT, start, 1);
     case '"': return string(lexer);
     case '\'': return character(lexer);
+    case '@': return make_token(lexer, TOKEN_AT, start, 1);
+    case '$': return make_token(lexer, TOKEN_DOLLAR, start, 1);
     }
 
     return error_token(lexer, "Unexpected character");

@@ -72,42 +72,42 @@ void error_reporter_destroy(ErrorReporter* reporter) {
     for (size_t i = 0; i < reporter->errors.count; i++) {
         if (reporter->errors.errors[i].message) {
             size_t msg_len = strlen(reporter->errors.errors[i].message) + 1;
-            MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
         }
         if (reporter->errors.errors[i].suggestion) {
             size_t sug_len = strlen(reporter->errors.errors[i].suggestion) + 1;
-            MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
         }
     }
-    MEM_FREE(alloc, reporter->errors.errors, reporter->errors.capacity * sizeof(ErrorInfo));
+    SLANG_MEM_FREE(alloc, reporter->errors.errors, reporter->errors.capacity * sizeof(ErrorInfo));
     
     // Free warning messages and suggestions
     for (size_t i = 0; i < reporter->warnings.count; i++) {
         if (reporter->warnings.errors[i].message) {
             size_t msg_len = strlen(reporter->warnings.errors[i].message) + 1;
-            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
         }
         if (reporter->warnings.errors[i].suggestion) {
             size_t sug_len = strlen(reporter->warnings.errors[i].suggestion) + 1;
-            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
         }
     }
-    MEM_FREE(alloc, reporter->warnings.errors, reporter->warnings.capacity * sizeof(ErrorInfo));
+    SLANG_MEM_FREE(alloc, reporter->warnings.errors, reporter->warnings.capacity * sizeof(ErrorInfo));
     
     // Free source files
     for (size_t i = 0; i < reporter->source_count; i++) {
         if (reporter->sources[i].filename) {
             size_t fname_len = strlen(reporter->sources[i].filename) + 1;
-            MEM_FREE(alloc, reporter->sources[i].filename, fname_len);
+            SLANG_MEM_FREE(alloc, reporter->sources[i].filename, fname_len);
         }
         if (reporter->sources[i].source) {
             size_t src_len = strlen(reporter->sources[i].source) + 1;
-            MEM_FREE(alloc, reporter->sources[i].source, src_len);
+            SLANG_MEM_FREE(alloc, reporter->sources[i].source, src_len);
         }
     }
-    MEM_FREE(alloc, reporter->sources, reporter->source_capacity * sizeof(SourceFile));
+    SLANG_MEM_FREE(alloc, reporter->sources, reporter->source_capacity * sizeof(SourceFile));
     
-    MEM_FREE(alloc, reporter, sizeof(ErrorReporter));
+    SLANG_MEM_FREE(alloc, reporter, sizeof(ErrorReporter));
 }
 
 static void error_list_add(ErrorList* list, const ErrorInfo* info) {
@@ -123,7 +123,7 @@ static void error_list_add(ErrorList* list, const ErrorInfo* info) {
         // Copy old data
         if (list->errors) {
             memcpy(new_errors, list->errors, old_capacity * sizeof(ErrorInfo));
-            MEM_FREE(alloc, list->errors, old_capacity * sizeof(ErrorInfo));
+            SLANG_MEM_FREE(alloc, list->errors, old_capacity * sizeof(ErrorInfo));
         }
         
         list->errors = new_errors;
@@ -252,7 +252,7 @@ void error_set_source(ErrorReporter* reporter, const char* filename, const char*
         // Free old source
         if (existing->source) {
             size_t old_len = strlen(existing->source) + 1;
-            MEM_FREE(alloc, existing->source, old_len);
+            SLANG_MEM_FREE(alloc, existing->source, old_len);
         }
         existing->source = MEM_STRDUP(alloc, source);
         return;
@@ -268,7 +268,7 @@ void error_set_source(ErrorReporter* reporter, const char* filename, const char*
         // Copy old data
         if (reporter->sources) {
             memcpy(new_sources, reporter->sources, old_capacity * sizeof(SourceFile));
-            MEM_FREE(alloc, reporter->sources, old_capacity * sizeof(SourceFile));
+            SLANG_MEM_FREE(alloc, reporter->sources, old_capacity * sizeof(SourceFile));
         }
         
         reporter->sources = new_sources;
@@ -356,11 +356,11 @@ void error_clear(ErrorReporter* reporter) {
     for (size_t i = 0; i < reporter->errors.count; i++) {
         if (reporter->errors.errors[i].message) {
             size_t msg_len = strlen(reporter->errors.errors[i].message) + 1;
-            MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->errors.errors[i].message, msg_len);
         }
         if (reporter->errors.errors[i].suggestion) {
             size_t sug_len = strlen(reporter->errors.errors[i].suggestion) + 1;
-            MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->errors.errors[i].suggestion, sug_len);
         }
     }
     reporter->errors.count = 0;
@@ -369,11 +369,11 @@ void error_clear(ErrorReporter* reporter) {
     for (size_t i = 0; i < reporter->warnings.count; i++) {
         if (reporter->warnings.errors[i].message) {
             size_t msg_len = strlen(reporter->warnings.errors[i].message) + 1;
-            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->warnings.errors[i].message, msg_len);
         }
         if (reporter->warnings.errors[i].suggestion) {
             size_t sug_len = strlen(reporter->warnings.errors[i].suggestion) + 1;
-            MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
+            SLANG_MEM_FREE(alloc, (void*)reporter->warnings.errors[i].suggestion, sug_len);
         }
     }
     reporter->warnings.count = 0;

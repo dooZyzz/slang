@@ -1,0 +1,7 @@
+{
+  "name": "math",
+  "version": "1.0.0",
+  "description": "Mathematical functions module",
+  "type": "library",
+  "sources": ["math_module.swift"]
+}

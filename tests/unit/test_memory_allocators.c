@@ -39,8 +39,8 @@ static void test_platform_allocator(TestSuite* suite) {
     TEST_ASSERT_EQUAL_INT(suite, 2, stats.allocation_count, "Allocation count");
     
     // Free memory
-    MEM_FREE(alloc, ptr3, 200);
-    MEM_FREE(alloc, ptr2, 50);
+    SLANG_MEM_FREE(alloc, ptr3, 200);
+    SLANG_MEM_FREE(alloc, ptr2, 50);
     
     stats = mem_get_stats(alloc);
     TEST_ASSERT_EQUAL_INT(suite, 0, stats.current_usage, "Memory freed");
@@ -62,7 +62,7 @@ static void test_arena_allocator(TestSuite* suite) {
     }
     
     // Arena should not free individual allocations
-    MEM_FREE(arena, ptrs[0], 50);
+    SLANG_MEM_FREE(arena, ptrs[0], 50);
     
     AllocatorStats stats = mem_get_stats(arena);
     TEST_ASSERT_EQUAL_INT(suite, 500, stats.current_usage, "Arena no individual free");
@@ -93,8 +93,8 @@ static void test_freelist_allocator(TestSuite* suite) {
     }
     
     // Free some blocks
-    MEM_FREE(freelist, ptrs[1], 64);
-    MEM_FREE(freelist, ptrs[3], 64);
+    SLANG_MEM_FREE(freelist, ptrs[1], 64);
+    SLANG_MEM_FREE(freelist, ptrs[3], 64);
     
     // Allocate again - should reuse freed blocks
     void* ptr1 = MEM_ALLOC(freelist, 48);
@@ -128,8 +128,8 @@ static void test_trace_allocator(TestSuite* suite) {
     TEST_ASSERT(suite, ptr1 && ptr2 && ptr3 && ptr4, "Trace allocations");
     
     // Free some allocations
-    MEM_FREE(trace, ptr1, 100);
-    MEM_FREE(trace, ptr3, 50);
+    SLANG_MEM_FREE(trace, ptr1, 100);
+    SLANG_MEM_FREE(trace, ptr3, 50);
     
     // Get stats
     AllocatorStats stats = mem_get_stats(trace);
@@ -148,8 +148,8 @@ static void test_trace_allocator(TestSuite* suite) {
     mem_check_leaks(trace);
     
     // Clean up remaining allocations
-    MEM_FREE(trace, ptr2, 200);
-    MEM_FREE(trace, ptr4, 150);
+    SLANG_MEM_FREE(trace, ptr2, 200);
+    SLANG_MEM_FREE(trace, ptr4, 150);
     
     mem_destroy(trace);
     mem_destroy(platform);

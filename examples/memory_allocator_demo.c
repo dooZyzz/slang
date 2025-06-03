@@ -32,8 +32,8 @@ void demo_platform_allocator(void) {
     free(stats);
     
     // Clean up
-    MEM_FREE(alloc, numbers, sizeof(int) * 10);
-    MEM_FREE(alloc, string, strlen(string) + 1);
+    SLANG_MEM_FREE(alloc, numbers, sizeof(int) * 10);
+    SLANG_MEM_FREE(alloc, string, strlen(string) + 1);
     
     mem_destroy(alloc);
 }
@@ -110,9 +110,9 @@ void demo_trace_allocator(void) {
     hash_map_put(map, "player", player_name);
     
     // Simulate a memory leak - forget to free physics_data
-    MEM_FREE(trace, game_state, sizeof(int) * 100);
-    MEM_FREE(trace, player_name, strlen(player_name) + 1);
-    // MEM_FREE(trace, physics_data, sizeof(float) * 50);  // Oops, forgot this!
+    SLANG_MEM_FREE(trace, game_state, sizeof(int) * 100);
+    SLANG_MEM_FREE(trace, player_name, strlen(player_name) + 1);
+    // SLANG_MEM_FREE(trace, physics_data, sizeof(float) * 50);  // Oops, forgot this!
     
     // Destroy hash map
     hash_map_destroy(map);
@@ -127,7 +127,7 @@ void demo_trace_allocator(void) {
     mem_check_leaks(trace);
     
     // Clean up the leak
-    MEM_FREE(trace, physics_data, sizeof(float) * 50);
+    SLANG_MEM_FREE(trace, physics_data, sizeof(float) * 50);
     
     // Reset default allocator
     set_allocator(NULL);
@@ -161,8 +161,8 @@ void demo_freelist_allocator(void) {
     }
     
     // Free some nodes
-    MEM_FREE(freelist, nodes[1], sizeof(Node));
-    MEM_FREE(freelist, nodes[3], sizeof(Node));
+    SLANG_MEM_FREE(freelist, nodes[1], sizeof(Node));
+    SLANG_MEM_FREE(freelist, nodes[3], sizeof(Node));
     
     // Allocate again - will reuse freed blocks
     Node* reused1 = MEM_NEW(freelist, Node);
@@ -232,7 +232,7 @@ void demo_mixed_allocators(void) {
     printf("Arena usage after reset: %zu bytes\n", stats.current_usage);
     
     // Clean up
-    MEM_FREE(trace, config, strlen(config) + 1);
+    SLANG_MEM_FREE(trace, config, strlen(config) + 1);
     
     // Final memory report
     printf("\nFinal memory report:\n");

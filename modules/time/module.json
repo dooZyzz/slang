@@ -1,8 +1,27 @@
 {
-    "name": "time",
-    "version": "1.0.0",
-    "description": "Time and date utilities with native performance",
-    "main": "src/time.swift",
-    "type": "module",
-    "sources": ["src/time.swift"]
+  "name": "time",
+  "version": "1.0.0",
+  "description": "Native time module for SwiftLang",
+  "type": "native",
+  "main": "src/time.swift",
+  "native": {
+    "library": "time_native"
+  },
+  "exports": [
+    {
+      "name": "now",
+      "type": "function",
+      "native": "native_time_now"
+    },
+    {
+      "name": "format",
+      "type": "function", 
+      "native": "native_time_format"
+    },
+    {
+      "name": "sleep",
+      "type": "function",
+      "native": "native_time_sleep"
+    }
+  ]
 }

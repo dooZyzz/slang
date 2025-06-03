@@ -2,11 +2,14 @@
 #define MODULE_H
 
 #include <stdbool.h>
-#include <pthread.h>
 #include <time.h>
+#include "utils/platform_threads.h"
 #include "runtime/core/vm.h"
 #include "ast/ast.h"
 #include "runtime/packages/package.h"
+
+// Forward declaration for ModuleBundle
+typedef struct ModuleBundle ModuleBundle;
 
 typedef enum
 {
@@ -41,7 +44,7 @@ typedef struct Module
 
     // Reference counting for safe unloading
     int ref_count;
-    pthread_mutex_t ref_mutex;
+    platform_mutex_t ref_mutex;
 
     // LRU tracking
     time_t last_access_time;
@@ -81,6 +84,9 @@ typedef struct Module
 
     // For lazy loading
     Chunk* chunk; // Stored bytecode for lazy execution
+
+    // Unified bundle system
+    ModuleBundle* bundle; // Reference to module bundle if loaded from bundle
 } Module;
 
 // Module loader types for hierarchy

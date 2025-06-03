@@ -2,11 +2,14 @@
 #include "runtime/modules/extensions/module_hooks.h"
 #include "runtime/modules/loader/module_cache.h"
 #include "runtime/core/vm.h"
+#include "utils/platform_threads.h"
+#include "utils/platform_dynlib.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <dlfcn.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 /**
  * Module unloading support with proper cleanup and hook execution.
@@ -74,7 +77,7 @@ void module_unload(Module* module, VM* vm) {
     
     // Handle native module cleanup
     if (module->is_native && module->native_handle) {
-        dlclose(module->native_handle);
+        platform_dynlib_close(module->native_handle);
         module->native_handle = NULL;
         
         // Remove temporary native library file
@@ -89,7 +92,7 @@ void module_unload(Module* module, VM* vm) {
     module->module_object = NULL;
     
     // Destroy the reference counting mutex
-    pthread_mutex_destroy(&module->ref_mutex);
+    platform_mutex_destroy(&module->ref_mutex);
     
     // Finally free the module itself
     free(module);
@@ -179,9 +182,9 @@ bool module_can_unload(Module* module) {
     }
     
     // Check reference count
-    pthread_mutex_lock(&module->ref_mutex);
+    platform_mutex_lock(&module->ref_mutex);
     bool can_unload = (module->ref_count == 0);
-    pthread_mutex_unlock(&module->ref_mutex);
+    platform_mutex_unlock(&module->ref_mutex);
     
     return can_unload;
 }
@@ -198,27 +201,27 @@ void module_force_unload(Module* module, VM* vm) {
 void module_ref(Module* module) {
     if (!module) return;
     
-    pthread_mutex_lock(&module->ref_mutex);
+    platform_mutex_lock(&module->ref_mutex);
     module->ref_count++;
-    pthread_mutex_unlock(&module->ref_mutex);
+    platform_mutex_unlock(&module->ref_mutex);
 }
 
 void module_unref(Module* module) {
     if (!module) return;
     
-    pthread_mutex_lock(&module->ref_mutex);
+    platform_mutex_lock(&module->ref_mutex);
     if (module->ref_count > 0) {
         module->ref_count--;
     }
-    pthread_mutex_unlock(&module->ref_mutex);
+    platform_mutex_unlock(&module->ref_mutex);
 }
 
 int module_get_ref_count(Module* module) {
     if (!module) return 0;
     
-    pthread_mutex_lock(&module->ref_mutex);
+    platform_mutex_lock(&module->ref_mutex);
     int count = module->ref_count;
-    pthread_mutex_unlock(&module->ref_mutex);
+    platform_mutex_unlock(&module->ref_mutex);
     
     return count;
 }

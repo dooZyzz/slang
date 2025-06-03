@@ -184,7 +184,7 @@ static TaggedValue function_call_method(int arg_count, TaggedValue* args) {
         result = NIL_VAL;
     }
     
-    MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
+    SLANG_MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
     return result;
 }
 
@@ -237,7 +237,7 @@ static TaggedValue function_apply_method(int arg_count, TaggedValue* args) {
         result = NIL_VAL;
     }
     
-    MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
+    SLANG_MEM_FREE(vm_alloc, func_args, sizeof(TaggedValue) * (func_arg_count > 0 ? func_arg_count + 1 : 1));
     return result;
 }
 
@@ -584,7 +584,7 @@ TaggedValue string_split_method(int arg_count, TaggedValue* args) {
         token = strtok(NULL, delimiter);
     }
     
-    MEM_FREE(str_alloc, str_copy, strlen(str) + 1);
+    SLANG_MEM_FREE(str_alloc, str_copy, strlen(str) + 1);
     return OBJECT_VAL(result);
 }
 
